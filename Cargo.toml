@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/tlinalg-blas"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+authors = ["Hiroshi Shinaoka <h.shinaoka@gmail.com>", "tensor4all contributors"]
+repository = "https://github.com/tensor4all/tlinalg-blas-rs"
+publish = false
+
+[workspace.dependencies]
+tlinalg-blas = { version = "0.1.0", path = "crates/tlinalg-blas" }
+tlinalg-traits = { git = "https://github.com/tensor4all/tlinalg-rs.git", rev = "1f448c1828a8601210d88cd8015c5b883412e526", version = "0.1.0" }
+lapack = "0.20"
+blas-src = { version = "0.14", default-features = false }
+lapack-src = "0.13"
+num-complex = "0.4"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.ci]
+inherits = "test"
+incremental = false
+strip = "symbols"

@@ -1,0 +1,34 @@
+[package]
+name = "tlinalg-blas"
+description = "LAPACK/BLAS-backed implementation of the tlinalg tensor-free numerical interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Link OpenBLAS for this crate's own tests. Tenferro selects the source and the injected-symbol
+# path itself; this feature only exists so the crate has an executable check of its own.
+link-openblas = ["dep:blas-src", "dep:lapack-src"]
+
+[dependencies]
+tlinalg-traits = { workspace = true }
+lapack = { workspace = true }
+num-complex = { workspace = true }
+
+[dependencies.blas-src]
+workspace = true
+optional = true
+features = ["openblas"]
+
+[dependencies.lapack-src]
+workspace = true
+optional = true
+features = ["openblas"]
+
+[lints]
+workspace = true
