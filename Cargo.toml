@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/tlinalg-traits"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+authors = ["Hiroshi Shinaoka <h.shinaoka@gmail.com>", "tensor4all contributors"]
+repository = "https://github.com/tensor4all/tlinalg-rs"
+publish = false
+
+[workspace.dependencies]
+tlinalg-traits = { version = "0.1.0", path = "crates/tlinalg-traits" }
+num-complex = "0.4"
+rayon = "1.10"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.ci]
+inherits = "test"
+incremental = false
+strip = "symbols"
