@@ -29,7 +29,6 @@ use rayon::ThreadPool;
 /// assert!(matches!(Parallel::Sequential, Parallel::Sequential));
 /// ```
 #[derive(Clone, Copy, Debug)]
-#[non_exhaustive]
 pub enum Parallel<'a> {
     /// Run on the calling thread with no implementation-owned parallelism.
     Sequential,
@@ -50,11 +49,5 @@ impl Parallel<'_> {
             Self::Sequential => NonZeroUsize::MIN,
             Self::Pool { budget, .. } => budget,
         }
-    }
-
-    /// Whether the implementation may use more than one thread.
-    #[must_use]
-    pub fn is_parallel(self) -> bool {
-        matches!(self, Self::Pool { .. })
     }
 }

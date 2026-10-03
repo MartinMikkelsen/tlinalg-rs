@@ -149,15 +149,19 @@ pub enum Error {
         op: Op,
     },
 
-    /// A provider rejected an argument (for example a LAPACK `info < 0`).
-    #[error("{op} received an invalid {routine} argument ({argument})", op = .op.as_str())]
+    /// A caller-supplied argument was invalid.
+    ///
+    /// `role` is the host's name for the offending argument — `"pivot"`, `"config"`,
+    /// `"lapack_argument"` — and `detail` carries the provider's own text. Both are part of the
+    /// host-visible payload, so an implementation must not invent its own strings.
+    #[error("{op}: invalid {role} ({detail})", op = .op.as_str())]
     InvalidArgument {
         /// Operation being executed.
         op: Op,
-        /// Provider routine that rejected the argument.
-        routine: &'static str,
-        /// Provider-specific argument index. Negative by provider convention.
-        argument: i32,
+        /// Which argument was invalid, in the host's vocabulary.
+        role: &'static str,
+        /// Provider-provided detail.
+        detail: String,
     },
 
     /// A provider returned an unusable workspace size.
