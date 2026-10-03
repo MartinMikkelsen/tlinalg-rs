@@ -265,7 +265,16 @@ fn apply_row_swaps<T: Copy>(rhs: &mut [T], n: usize, nrhs: usize, ipiv: &[i32], 
     }
 }
 
-fn validate_pivots(op: Op, n: usize, ipiv: &[i32]) -> Result<()> {
+/// Reject a pivot outside `1..=n`.
+///
+/// A host that splits a batch into lanes can call this on the whole batch first, so that an invalid
+/// pivot is reported before any chunk mutates its output. Every solve entry point also validates the
+/// pivots it receives, so an implementation is safe on its own.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidArgument`] with role `"pivot"`.
+pub fn validate_pivots(op: Op, n: usize, ipiv: &[i32]) -> Result<()> {
     for &pivot_one_based in ipiv {
         let in_range = usize::try_from(pivot_one_based)
             .map(|pivot| (1..=n).contains(&pivot))
