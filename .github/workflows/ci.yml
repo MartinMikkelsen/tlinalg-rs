@@ -43,6 +43,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -j 16 --workspace --profile ci --features link-openblas
+      # The injected symbol set exports ?gesvd but not ?gesdd, so the other driver has to be
+      # exercised too; OpenBLAS provides both symbols.
+      - run: cargo test -j 16 --workspace --profile ci --features link-openblas,provider-inject
 
   # The interface and the argument marshalling still have to compile and lint without a vendor
   # library, which is what this job pins on macOS.
