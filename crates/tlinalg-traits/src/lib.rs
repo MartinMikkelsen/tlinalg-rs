@@ -44,7 +44,7 @@ pub mod scratch;
 pub use error::{Error, NonFiniteRole, Op, Result};
 pub use lane::LanePlan;
 pub use parallel::Parallel;
-pub use scratch::{Scalar, Workspace};
+pub use scratch::{IndexWorkspace, Scalar, Workspace};
 
 mod sealed {
     /// Seals [`crate::Scalar`].
