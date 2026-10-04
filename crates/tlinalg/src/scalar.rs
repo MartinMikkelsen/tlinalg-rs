@@ -36,6 +36,12 @@ pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
     /// This scalar from its faer entity; the inverse of [`ScalarEntity::entity_slice`].
     fn from_entity(entity: Self::Entity) -> Self;
 
+    /// This scalar from the conjugate of its faer entity.
+    ///
+    /// Transposing a factor into its adjoint needs this: the complex scalars conjugate, the real
+    /// ones are already their own conjugate.
+    fn from_entity_conj(entity: Self::Entity) -> Self;
+
     /// The real part of a scalar that is known to be real.
     ///
     /// A decomposition returns real singular values through the entity type, so this is the identity
@@ -68,6 +74,10 @@ macro_rules! impl_real_scalar {
             }
 
             fn from_entity(entity: Self::Entity) -> Self {
+                entity
+            }
+
+            fn from_entity_conj(entity: Self::Entity) -> Self {
                 entity
             }
 
@@ -114,6 +124,10 @@ macro_rules! impl_complex_scalar {
 
             fn from_entity(entity: Self::Entity) -> Self {
                 Self::new(entity.re, entity.im)
+            }
+
+            fn from_entity_conj(entity: Self::Entity) -> Self {
+                Self::new(entity.re, -entity.im)
             }
 
             fn real_from_entity(entity: Self::Entity) -> Self::Real {

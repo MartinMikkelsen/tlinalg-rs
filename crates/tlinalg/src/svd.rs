@@ -216,7 +216,9 @@ pub fn svd<T: FaerScalar>(
     }
     for col in 0..n {
         for row in 0..v_cols {
-            vt.push(T::from_entity(v_mat[(col, row)]));
+            // `V` is transposed into `Vᴴ`, so the complex scalars conjugate here. The real ones are
+            // their own conjugate, which is why the two implementations share this call.
+            vt.push(T::from_entity_conj(v_mat[(col, row)]));
         }
     }
     Ok(())
