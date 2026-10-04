@@ -33,6 +33,9 @@ pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
     /// The permutation parity scalar: `+1`, or `-1` when `odd`.
     fn parity(odd: bool) -> Self;
 
+    /// This scalar from its faer entity; the inverse of [`ScalarEntity::entity_slice`].
+    fn from_entity(entity: Self::Entity) -> Self;
+
     /// The real part of a scalar that is known to be real.
     ///
     /// A decomposition returns real singular values through the entity type, so this is the identity
@@ -62,6 +65,10 @@ macro_rules! impl_real_scalar {
                 } else {
                     1.0
                 }
+            }
+
+            fn from_entity(entity: Self::Entity) -> Self {
+                entity
             }
 
             fn real_from_entity(entity: Self::Entity) -> Self::Real {
@@ -103,6 +110,10 @@ macro_rules! impl_complex_scalar {
 
             fn parity(odd: bool) -> Self {
                 Self::new(if odd { -1.0 } else { 1.0 }, 0.0)
+            }
+
+            fn from_entity(entity: Self::Entity) -> Self {
+                Self::new(entity.re, entity.im)
             }
 
             fn real_from_entity(entity: Self::Entity) -> Self::Real {

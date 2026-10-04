@@ -6,10 +6,15 @@
 //!
 //! # Boundary
 //!
-//! The input is a borrowed [`RawStridedRef`] and the outputs are caller-provided slices, because the
-//! host owns tensors, placement and allocation. Internally faer still works in its own
-//! `Mat`/`Diag`/`MemBuffer` storage: that scratch is operation-local and stays native, exactly as
-//! before. This family therefore needs no [`tlinalg_traits::Workspace`].
+//! The input is a borrowed [`RawStridedRef`] and the outputs are caller-provided vectors, because
+//! the host owns tensors, placement and allocation. The vectors are **cleared and then filled by
+//! `push`**, which is what the pre-extraction code did: taking a `&mut [T]` instead would force the
+//! host to initialize the buffer before the kernel overwrote it, adding a write pass the previous
+//! implementation did not have.
+//!
+//! Internally faer still works in its own `Mat`/`Diag`/`MemBuffer` storage: that scratch is
+//! operation-local and stays native, exactly as before. This family therefore needs no
+//! [`tlinalg_traits::Workspace`].
 //!
 //! # Conventions
 //!
@@ -41,21 +46,6 @@ fn checked_product(op: Op, role: &'static str, shape: &[usize]) -> Result<usize>
         })
 }
 
-/// Check that one output buffer holds exactly the described matrix or vector.
-fn check_len(op: Op, role: &'static str, expected: usize, actual: usize) -> Result<()> {
-    if expected == actual {
-        return Ok(());
-    }
-    Err(Error::Inconsistent {
-        op,
-        detail: match role {
-            "left singular vectors" => "U does not hold m x u_cols",
-            "singular values" => "S does not hold min(m, n)",
-            _ => "VH does not hold v_cols x n",
-        },
-    })
-}
-
 /// Singular values of one `m x n` matrix, without the vectors.
 ///
 /// # Errors
@@ -67,7 +57,7 @@ pub fn svd_values<T: FaerScalar>(
     m: usize,
     n: usize,
     input: RawStridedRef<'_, T>,
-    s: &mut [<T as ScalarEntity>::Real],
+    s: &mut Vec<<T as ScalarEntity>::Real>,
     par: Parallel<'_>,
 ) -> Result<()> {
     let k = m.min(n);
@@ -78,7 +68,7 @@ pub fn svd_values<T: FaerScalar>(
             detail: format!("input describes {:?}, expected {m}x{n}", input.dims()),
         });
     }
-    check_len(op, "singular values", k, s.len())?;
+    s.clear();
     if m == 0 || n == 0 {
         return Ok(());
     }
@@ -115,8 +105,8 @@ pub fn svd_values<T: FaerScalar>(
         )
         .map_err(|_| Error::NonConvergence { op })
     })?;
-    for (index, slot) in s.iter_mut().enumerate() {
-        *slot = <T as ScalarEntity>::real_from_entity(s_diag[index]);
+    for index in 0..k {
+        s.push(<T as ScalarEntity>::real_from_entity(s_diag[index]));
     }
     Ok(())
 }
@@ -138,9 +128,9 @@ pub fn svd<T: FaerScalar>(
     n: usize,
     full: bool,
     input: RawStridedRef<'_, T>,
-    u: &mut [T],
-    s: &mut [<T as ScalarEntity>::Real],
-    vt: &mut [T],
+    u: &mut Vec<T>,
+    s: &mut Vec<<T as ScalarEntity>::Real>,
+    vt: &mut Vec<T>,
     par: Parallel<'_>,
 ) -> Result<()> {
     let k = m.min(n);
@@ -158,19 +148,13 @@ pub fn svd<T: FaerScalar>(
             detail: format!("input describes {:?}, expected {m}x{n}", input.dims()),
         });
     }
-    check_len(
-        op,
-        "left singular vectors",
-        checked_product(op, "U", &[m, u_cols])?,
-        u.len(),
-    )?;
-    check_len(op, "singular values", k, s.len())?;
-    check_len(
-        op,
-        "right singular vectors",
-        checked_product(op, "VH", &[v_cols, n])?,
-        vt.len(),
-    )?;
+    // The sizes are computed here only so an overflow is reported as a configuration error rather
+    // than as a failed reservation; the vectors themselves are filled below.
+    let _ = checked_product(op, "U", &[m, u_cols])?;
+    let _ = checked_product(op, "VH", &[v_cols, n])?;
+    u.clear();
+    s.clear();
+    vt.clear();
     if m == 0 || n == 0 {
         return Ok(());
     }
@@ -216,22 +200,20 @@ pub fn svd<T: FaerScalar>(
         .map_err(|_| Error::NonConvergence { op })
     })?;
 
-    // The outputs are `T` and faer's matrices are `T::Entity`, which share a layout, so write
-    // through the layout-preserving view rather than converting element by element.
-    let u_out = T::entity_slice_mut(u);
+    // Column-major `U`, `min(m, n)` real singular values, then column-major `Vᴴ`, pushed in the
+    // order the previous implementation produced them.
     for col in 0..u_cols {
         for row in 0..m {
-            u_out[row + col * m] = u_mat[(row, col)];
+            u.push(T::from_entity(u_mat[(row, col)]));
         }
     }
-    for (index, slot) in s.iter_mut().enumerate() {
+    for index in 0..k {
         // faer returns a real singular value through the entity type, so take its real part.
-        *slot = <T as ScalarEntity>::real_from_entity(s_diag[index]);
+        s.push(<T as ScalarEntity>::real_from_entity(s_diag[index]));
     }
-    let vt_out = T::entity_slice_mut(vt);
     for col in 0..n {
         for row in 0..v_cols {
-            vt_out[row + col * v_cols] = v_mat[(col, row)];
+            vt.push(T::from_entity(v_mat[(col, row)]));
         }
     }
     Ok(())
