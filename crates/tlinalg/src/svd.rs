@@ -18,10 +18,12 @@
 //!
 //! # Conventions
 //!
-//! `u` is `m x u_cols` column-major, `s` holds `min(m, n)` **real** singular values in
-//! non-increasing order, and `vt` is `v_cols x n` column-major and holds `Vᴴ` (not `V`). `full`
-//! selects the square unitary factors `u_cols = m`, `v_cols = n`; otherwise `u_cols = v_cols =
-//! min(m, n)`.
+//! `u` is `m x u_cols` column-major, `vt` is `v_cols x n` column-major and holds `Vᴴ` (not `V`),
+//! and `s` holds `min(m, n)` singular values in non-increasing order **in the scalar type itself**.
+//! For the complex scalars that means complex values with a zero imaginary part, which is what the
+//! pre-extraction code produced and what its callers' plumbing expects; [`svd_values`] returns the
+//! real values instead, matching the values-only path. `full` selects the square unitary factors
+//! `u_cols = m`, `v_cols = n`; otherwise `u_cols = v_cols = min(m, n)`.
 
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
@@ -129,7 +131,7 @@ pub fn svd<T: FaerScalar>(
     full: bool,
     input: RawStridedRef<'_, T>,
     u: &mut Vec<T>,
-    s: &mut Vec<<T as ScalarEntity>::Real>,
+    s: &mut Vec<T>,
     vt: &mut Vec<T>,
     par: Parallel<'_>,
 ) -> Result<()> {
@@ -208,8 +210,9 @@ pub fn svd<T: FaerScalar>(
         }
     }
     for index in 0..k {
-        // faer returns a real singular value through the entity type, so take its real part.
-        s.push(<T as ScalarEntity>::real_from_entity(s_diag[index]));
+        // A real singular value carried in the scalar type: zero imaginary part for the complex
+        // scalars, which is the shape the pre-extraction callers consumed.
+        s.push(T::from_entity(s_diag[index]));
     }
     for col in 0..n {
         for row in 0..v_cols {
