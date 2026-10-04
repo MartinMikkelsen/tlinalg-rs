@@ -13,16 +13,36 @@
 //!
 //! # Initialization
 //!
-//! [`Workspace::acquire_zeroed`] guarantees every element is zero. [`Workspace::acquire_uninit`] is
-//! the full-overwrite path: the contents are unspecified and reading an element before writing it is
-//! undefined behaviour. An implementation must pick the same variant a call site uses today; the two
-//! are not interchangeable.
+//! Three shapes, and an implementation must pick the one each call site uses today:
+//!
+//! * [`Workspace::acquire_zeroed`] guarantees every element is zero.
+//! * [`Workspace::acquire_uninit`] is the full-overwrite path: the contents are unspecified and
+//!   reading an element before writing it is undefined behaviour.
+//! * [`Workspace::acquire_capacity`] returns an empty buffer with room for `cap` elements, for call
+//!   sites that populate with `push`/`extend` rather than by index.
+//!
+//! They are not interchangeable: swapping one for another changes either correctness or the
+//! zero-fill and allocation counts the host measures.
+//!
+//! # Index scratch
+//!
+//! Use [`IndexWorkspace`] for integer scratch such as a LAPACK `iwork`: an index buffer is not a
+//! numerical scalar, so it stays out of [`Workspace`].
 //!
 //! # Concurrency
 //!
 //! A workspace is **not** used across lanes. Hosts acquire batch and output buffers before fanning
 //! out, and per-lane scratch is allocated per lane. `Workspace` therefore has no `Sync` requirement
 //! and no concurrent acquisition path.
+//!
+//! # Abandonment
+//!
+//! A provider may stop using a buffer without releasing it: on an error return, an early `?`, or a
+//! panic. Abandoning is permitted and is not the provider's responsibility to tidy up — the host
+//! owns token cancellation and unwind replenishment, exactly as it does for its own buffers today.
+//! A provider must **not** release a buffer it abandoned, and must not release on a path where the
+//! current implementation drops it instead; doing so would change the host's in-flight accounting.
+//! Releasing is required only where a buffer is handed back on a successful path.
 //!
 //! # Example
 //!
@@ -33,6 +53,7 @@
 //! struct Owned;
 //! impl Workspace<f64> for Owned {
 //!     fn acquire_zeroed(&mut self, len: usize) -> Vec<f64> { vec![0.0; len] }
+//!     fn acquire_capacity(&mut self, cap: usize) -> Vec<f64> { Vec::with_capacity(cap) }
 //!     fn acquire_uninit(&mut self, len: usize) -> Vec<MaybeUninit<f64>> {
 //!         (0..len).map(|_| MaybeUninit::uninit()).collect()
 //!     }
@@ -75,6 +96,16 @@ pub trait Workspace<T: Scalar> {
     /// Reading any element before writing it yields zero.
     fn acquire_zeroed(&mut self, len: usize) -> Vec<T>;
 
+    /// Acquire an owned, **empty** buffer with room for at least `cap` elements.
+    ///
+    /// # Contract
+    ///
+    /// The returned vector has length zero, so population is by `push`/`extend` and needs no unsafe
+    /// code. The host may hand back a recycled allocation, so the capacity is a lower bound, not an
+    /// exact size. This matches the host's capacity-acquisition operation, and a buffer obtained
+    /// this way is released with [`Workspace::release`] like any other.
+    fn acquire_capacity(&mut self, cap: usize) -> Vec<T>;
+
     /// Acquire an owned buffer of `len` elements whose contents are unspecified.
     ///
     /// # Contract
@@ -89,4 +120,39 @@ pub trait Workspace<T: Scalar> {
     ///
     /// `buf` was obtained from this workspace. A buffer that becomes a result is **not** released.
     fn release(&mut self, buf: Vec<T>);
+}
+
+/// Scratch for integer work buffers a provider interface requires.
+///
+/// An index buffer is not a numerical scalar, so it is not a [`Scalar`] and does not belong in
+/// [`Workspace`]. Implemented by the host over the same pool, so integer scratch keeps the host's
+/// retention and accounting.
+///
+/// # Example
+///
+/// ```
+/// use tlinalg_traits::IndexWorkspace;
+///
+/// struct Owned;
+/// impl IndexWorkspace for Owned {
+///     fn acquire_zeroed_index(&mut self, len: usize) -> Vec<i32> { vec![0; len] }
+///     fn release_index(&mut self, _buf: Vec<i32>) {}
+/// }
+///
+/// let mut ws = Owned;
+/// assert_eq!(ws.acquire_zeroed_index(2), [0, 0]);
+/// ```
+pub trait IndexWorkspace {
+    /// Acquire an owned index buffer of `len` elements, every element zero.
+    ///
+    /// Zeroed because the provider interfaces this serves acquire integer scratch zeroed today, and
+    /// this returns initialized `Vec<i32>` storage without an unsafe step.
+    fn acquire_zeroed_index(&mut self, len: usize) -> Vec<i32>;
+
+    /// Return an index buffer to the host's pool.
+    ///
+    /// # Contract
+    ///
+    /// `buf` was obtained from this workspace.
+    fn release_index(&mut self, buf: Vec<i32>);
 }
