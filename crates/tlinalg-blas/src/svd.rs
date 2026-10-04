@@ -264,7 +264,9 @@ where
     } else {
         Vec::new()
     };
-    let mut query = vec![T::default(); 1];
+    // A stack slot, not a heap buffer: the workspace query writes one value and the caller-visible
+    // allocation count must not grow because of it.
+    let mut query = [T::default(); 1];
     let mut info = 0;
     {
         let (a0, s0, u0, vt0) = layout.chunk(0, a, s, u, vt);
