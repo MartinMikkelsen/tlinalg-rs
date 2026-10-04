@@ -43,9 +43,10 @@ fn check_svd(m: usize, n: usize, full: bool) {
     let a = matrix(m, n);
     let k = m.min(n);
     let (u_cols, v_cols) = if full { (m, n) } else { (k, k) };
-    let mut u = vec![0.0f64; m * u_cols];
-    let mut s = vec![0.0f64; k];
-    let mut vt = vec![0.0f64; v_cols * n];
+    // Empty vectors with the right capacity: the kernel pushes the factors.
+    let mut u = Vec::with_capacity(m * u_cols);
+    let mut s = Vec::with_capacity(k);
+    let mut vt = Vec::with_capacity(v_cols * n);
     svd(
         Op::Svd,
         m,
@@ -58,6 +59,10 @@ fn check_svd(m: usize, n: usize, full: bool) {
         Parallel::Sequential,
     )
     .unwrap();
+
+    assert_eq!(u.len(), m * u_cols);
+    assert_eq!(s.len(), k);
+    assert_eq!(vt.len(), v_cols * n);
 
     // Values are non-increasing and positive.
     for pair in s.windows(2) {
@@ -90,21 +95,21 @@ fn svd_reconstructs_square_tall_and_wide_matrices() {
 fn values_only_agrees_with_the_full_decomposition() {
     let (m, n) = (5usize, 4usize);
     let a = matrix(m, n);
-    let k = m.min(n);
-    let mut full = vec![0.0f64; k];
+    assert!(m.min(n) > 0);
+    let mut full = Vec::new();
     svd(
         Op::Svd,
         m,
         n,
         false,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
-        &mut vec![0.0; m * k],
+        &mut Vec::new(),
         &mut full,
-        &mut vec![0.0; k * n],
+        &mut Vec::new(),
         Parallel::Sequential,
     )
     .unwrap();
-    let mut only = vec![0.0f64; k];
+    let mut only = Vec::new();
     svd_values(
         Op::SvdValues,
         m,
@@ -130,9 +135,9 @@ fn complex_and_f32_reconstruct() {
         .enumerate()
         .map(|(index, real)| Complex64::new(real, if index % 3 == 0 { 0.5 } else { -0.25 }))
         .collect();
-    let mut u = vec![Complex64::new(0.0, 0.0); m * k];
-    let mut s = vec![0.0f64; k];
-    let mut vt = vec![Complex64::new(0.0, 0.0); k * n];
+    let mut u = Vec::new();
+    let mut s = Vec::new();
+    let mut vt = Vec::new();
     svd(
         Op::Svd,
         m,
@@ -168,9 +173,9 @@ fn complex_and_f32_reconstruct() {
         .iter()
         .map(|v| Complex32::new(v.re as f32, v.im as f32))
         .collect();
-    let mut u32 = vec![Complex32::new(0.0, 0.0); m * k];
-    let mut s32 = vec![0.0f32; k];
-    let mut vt32 = vec![Complex32::new(0.0, 0.0); k * n];
+    let mut u32 = Vec::new();
+    let mut s32 = Vec::new();
+    let mut vt32 = Vec::new();
     svd(
         Op::Svd,
         m,
@@ -185,9 +190,9 @@ fn complex_and_f32_reconstruct() {
     .unwrap();
 
     let ar: Vec<f32> = matrix(m, n).into_iter().map(|v| v as f32).collect();
-    let mut ur = vec![0.0f32; m * k];
-    let mut sr = vec![0.0f32; k];
-    let mut vtr = vec![0.0f32; k * n];
+    let mut ur = Vec::new();
+    let mut sr = Vec::new();
+    let mut vtr = Vec::new();
     svd(
         Op::Svd,
         m,
@@ -204,14 +209,15 @@ fn complex_and_f32_reconstruct() {
 }
 
 #[test]
-fn wrong_sized_outputs_are_rejected() {
+fn outputs_are_cleared_before_being_filled() {
+    // The caller may reuse a pooled vector for the next call, so a stale length must not survive.
     let (m, n) = (3usize, 2usize);
     let a = matrix(m, n);
     let k = m.min(n);
-    let mut u = vec![0.0f64; m * k];
-    let mut s = vec![0.0f64; k];
-    let mut vt = vec![0.0f64; k * n - 1];
-    let error = svd(
+    let mut u = vec![7.0f64; 99];
+    let mut s = vec![7.0f64; 99];
+    let mut vt = vec![7.0f64; 99];
+    svd(
         Op::Svd,
         m,
         n,
@@ -222,6 +228,8 @@ fn wrong_sized_outputs_are_rejected() {
         &mut vt,
         Parallel::Sequential,
     )
-    .unwrap_err();
-    assert!(matches!(error, tlinalg_traits::Error::Inconsistent { .. }));
+    .unwrap();
+    assert_eq!(u.len(), m * k);
+    assert_eq!(s.len(), k);
+    assert_eq!(vt.len(), k * n);
 }
