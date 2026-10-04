@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod packed_lu;
+pub mod svd;
 
 mod scalar;
 

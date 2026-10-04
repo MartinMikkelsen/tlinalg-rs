@@ -21,12 +21,23 @@ pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
     /// The faer scalar sharing this type's memory layout.
     type Entity: faer::traits::ComplexField + Copy + PartialEq + Default;
 
+    /// The real scalar this type's singular values and eigenvalues live in.
+    ///
+    /// A host allocates those outputs, so this is a [`tlinalg_traits::Scalar`] too.
+    type Real: tlinalg_traits::Scalar + Default + PartialEq;
+
     /// Reinterpret a slice as the faer entity type.
     fn entity_slice(data: &[Self]) -> &[Self::Entity];
     /// Reinterpret a mutable slice as the faer entity type.
     fn entity_slice_mut(data: &mut [Self]) -> &mut [Self::Entity];
     /// The permutation parity scalar: `+1`, or `-1` when `odd`.
     fn parity(odd: bool) -> Self;
+
+    /// The real part of a scalar that is known to be real.
+    ///
+    /// A decomposition returns real singular values through the entity type, so this is the identity
+    /// for the real scalars and the real part for the complex ones.
+    fn real_from_entity(entity: Self::Entity) -> Self::Real;
 }
 
 macro_rules! impl_real_scalar {
@@ -35,6 +46,7 @@ macro_rules! impl_real_scalar {
 
         impl ScalarEntity for $scalar {
             type Entity = $scalar;
+            type Real = $scalar;
 
             fn entity_slice(data: &[Self]) -> &[Self::Entity] {
                 data
@@ -51,12 +63,16 @@ macro_rules! impl_real_scalar {
                     1.0
                 }
             }
+
+            fn real_from_entity(entity: Self::Entity) -> Self::Real {
+                entity
+            }
         }
     };
 }
 
 macro_rules! impl_complex_scalar {
-    ($scalar:ty, $entity:ty) => {
+    ($scalar:ty, $entity:ty, $real:ty) => {
         // The casts below are unsound unless the two types have the same size, alignment and field
         // offsets; these const assertions are the whole proof, and they run at compile time.
         const _: () = {
@@ -70,6 +86,7 @@ macro_rules! impl_complex_scalar {
 
         impl ScalarEntity for $scalar {
             type Entity = $entity;
+            type Real = $real;
 
             fn entity_slice(data: &[Self]) -> &[Self::Entity] {
                 // SAFETY: the const assertions above pin size, alignment and field offsets, so both
@@ -87,11 +104,15 @@ macro_rules! impl_complex_scalar {
             fn parity(odd: bool) -> Self {
                 Self::new(if odd { -1.0 } else { 1.0 }, 0.0)
             }
+
+            fn real_from_entity(entity: Self::Entity) -> Self::Real {
+                entity.re
+            }
         }
     };
 }
 
 impl_real_scalar!(f32);
 impl_real_scalar!(f64);
-impl_complex_scalar!(Complex32, faer::c32);
-impl_complex_scalar!(Complex64, faer::c64);
+impl_complex_scalar!(Complex32, faer::c32, f32);
+impl_complex_scalar!(Complex64, faer::c64, f64);
