@@ -43,11 +43,31 @@ pub mod symbols {
         fn minus_one() -> Self;
         /// The `lwork` a workspace query returned, as a real scalar.
         fn work_query_len(query: Self) -> f64;
+
+        /// The LAPACK routine the selected driver calls, for diagnostics.
+        fn routine_name() -> &'static str;
         /// `?getrf`: factor one column-major `m x n` matrix in place.
-        fn getrf(m: i32, n: i32, data: &mut [Self], lda: i32, ipiv: &mut [i32], info: &mut i32);
+        ///
+        /// # Safety
+        ///
+        /// `data` holds a mutable column-major `lda x n` matrix, `ipiv` holds at least
+        /// `min(m, n)` pivots, and `m`, `n`, `lda` describe them.
+        unsafe fn getrf(
+            m: i32,
+            n: i32,
+            data: &mut [Self],
+            lda: i32,
+            ipiv: &mut [i32],
+            info: &mut i32,
+        );
         /// `?getrs`: solve `op(A) X = B` from `?getrf` factors.
+        ///
+        /// # Safety
+        ///
+        /// `a` and `ipiv` are a prior matching `?getrf` factorization, `b` holds a mutable
+        /// `ldb x nrhs` right-hand side, and the dimensions describe them.
         #[allow(clippy::too_many_arguments)]
-        fn getrs(
+        unsafe fn getrs(
             trans: u8,
             n: i32,
             nrhs: i32,
@@ -71,7 +91,12 @@ pub mod symbols {
         /// `rwork` is empty for the real routines and required by the complex ones; `iwork` is
         /// required by `?gesdd` and ignored by `?gesvd`.
         #[allow(clippy::too_many_arguments)]
-        fn svd_driver(
+        /// # Safety
+        ///
+        /// Every buffer holds what the selected LAPACK routine documents for these dimensions:
+        /// `a` a mutable `m x n` matrix, `work` at least the queried `lwork`, `rwork` the
+        /// documented real workspace, `iwork` the integer workspace, and `u`/`vt` the factors.
+        unsafe fn svd_driver(
             jobu: u8,
             jobvt: u8,
             m: i32,
@@ -92,7 +117,7 @@ pub mod symbols {
     }
 
     macro_rules! impl_real_symbols {
-        ($scalar:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path) => {
+        ($scalar:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path, $gesdd_routine:literal, $gesvd_routine:literal) => {
             impl Symbols for $scalar {
                 type Real = $scalar;
 
@@ -108,7 +133,17 @@ pub mod symbols {
                     query as f64
                 }
 
-                fn getrf(
+                #[cfg(not(feature = "provider-inject"))]
+                fn routine_name() -> &'static str {
+                    $gesdd_routine
+                }
+
+                #[cfg(feature = "provider-inject")]
+                fn routine_name() -> &'static str {
+                    $gesvd_routine
+                }
+
+                unsafe fn getrf(
                     m: i32,
                     n: i32,
                     data: &mut [Self],
@@ -123,7 +158,7 @@ pub mod symbols {
                     }
                 }
 
-                fn getrs(
+                unsafe fn getrs(
                     trans: u8,
                     n: i32,
                     nrhs: i32,
@@ -141,7 +176,7 @@ pub mod symbols {
                     }
                 }
 
-                fn svd_driver(
+                unsafe fn svd_driver(
                     jobu: u8,
                     jobvt: u8,
                     m: i32,
@@ -186,7 +221,7 @@ pub mod symbols {
     }
 
     macro_rules! impl_complex_symbols {
-        ($scalar:ty, $real:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path) => {
+        ($scalar:ty, $real:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path, $gesdd_routine:literal, $gesvd_routine:literal) => {
             impl Symbols for $scalar {
                 type Real = $real;
 
@@ -202,7 +237,17 @@ pub mod symbols {
                     query.re as f64
                 }
 
-                fn getrf(
+                #[cfg(not(feature = "provider-inject"))]
+                fn routine_name() -> &'static str {
+                    $gesdd_routine
+                }
+
+                #[cfg(feature = "provider-inject")]
+                fn routine_name() -> &'static str {
+                    $gesvd_routine
+                }
+
+                unsafe fn getrf(
                     m: i32,
                     n: i32,
                     data: &mut [Self],
@@ -216,7 +261,7 @@ pub mod symbols {
                     }
                 }
 
-                fn getrs(
+                unsafe fn getrs(
                     trans: u8,
                     n: i32,
                     nrhs: i32,
@@ -239,7 +284,7 @@ pub mod symbols {
                     }
                 }
 
-                fn svd_driver(
+                unsafe fn svd_driver(
                     jobu: u8,
                     jobvt: u8,
                     m: i32,
@@ -288,14 +333,18 @@ pub mod symbols {
         lapack::sgetrf,
         lapack::sgetrs,
         lapack::sgesdd,
-        lapack::sgesvd
+        lapack::sgesvd,
+        "sgesdd",
+        "sgesvd"
     );
     impl_real_symbols!(
         f64,
         lapack::dgetrf,
         lapack::dgetrs,
         lapack::dgesdd,
-        lapack::dgesvd
+        lapack::dgesvd,
+        "dgesdd",
+        "dgesvd"
     );
     impl_complex_symbols!(
         num_complex::Complex32,
@@ -303,7 +352,9 @@ pub mod symbols {
         lapack::cgetrf,
         lapack::cgetrs,
         lapack::cgesdd,
-        lapack::cgesvd
+        lapack::cgesvd,
+        "cgesdd",
+        "cgesvd"
     );
     impl_complex_symbols!(
         num_complex::Complex64,
@@ -311,7 +362,9 @@ pub mod symbols {
         lapack::zgetrf,
         lapack::zgetrs,
         lapack::zgesdd,
-        lapack::zgesvd
+        lapack::zgesvd,
+        "zgesdd",
+        "zgesvd"
     );
 }
 
