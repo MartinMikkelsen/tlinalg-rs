@@ -158,10 +158,10 @@ fn complex_and_f32_reconstruct() {
     let mut rebuilt = vec![Complex64::new(0.0, 0.0); m * n];
     for row in 0..m {
         for col in 0..n {
+            // `vt` already holds `Vᴴ`, so the product needs no further conjugation.
             let mut acc = Complex64::new(0.0, 0.0);
             for j in 0..k {
-                // Vᴴ[row j] is conjugated when multiplying out.
-                acc += u[row + j * m] * s[j] * vt[j + col * k].conj();
+                acc += u[row + j * m] * s[j] * vt[j + col * k];
             }
             rebuilt[row + col * m] = acc;
         }
