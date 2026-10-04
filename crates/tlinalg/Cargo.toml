@@ -13,6 +13,7 @@ publish.workspace = true
 faer = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
+strided-view = { workspace = true }
 tlinalg-traits = { workspace = true }
 
 [lints]

@@ -816,6 +816,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "strided-traits"
+version = "0.4.4"
+source = "git+https://github.com/tensor4all/strided-rs.git?rev=25705339d45583f5eb77bdbde22f2349b48e3f95#25705339d45583f5eb77bdbde22f2349b48e3f95"
+dependencies = [
+ "num-complex",
+ "num-traits",
+]
+
+[[package]]
+name = "strided-view"
+version = "0.4.4"
+source = "git+https://github.com/tensor4all/strided-rs.git?rev=25705339d45583f5eb77bdbde22f2349b48e3f95#25705339d45583f5eb77bdbde22f2349b48e3f95"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "strided-traits",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -918,6 +938,7 @@ dependencies = [
  "faer",
  "num-complex",
  "rayon",
+ "strided-view",
  "tlinalg-traits",
 ]
 
