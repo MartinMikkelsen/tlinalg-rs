@@ -13,7 +13,7 @@ publish = false
 
 [workspace.dependencies]
 tlinalg-blas = { version = "0.1.0", path = "crates/tlinalg-blas" }
-tlinalg-traits = { git = "https://github.com/tensor4all/tlinalg-rs.git", rev = "1f448c1828a8601210d88cd8015c5b883412e526", version = "0.1.0" }
+tlinalg-traits = { git = "https://github.com/tensor4all/tlinalg-rs.git", rev = "b243ae87afd916ac8dee73fcc8dbf8491e20ed22", version = "0.1.0" }
 lapack = "0.20"
 blas-src = { version = "0.14", default-features = false }
 lapack-src = "0.13"
