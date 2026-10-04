@@ -150,6 +150,11 @@ fn complex_and_f32_reconstruct() {
         Parallel::Sequential,
     )
     .unwrap();
+    // `s` is carried in the complex scalar type with a zero imaginary part.
+    for value in &s {
+        assert_eq!(value.im, 0.0);
+        assert!(value.re > 0.0);
+    }
     let mut rebuilt = vec![Complex64::new(0.0, 0.0); m * n];
     for row in 0..m {
         for col in 0..n {
