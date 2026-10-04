@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 pub mod lu;
+pub mod svd;
 
 /// Link the vendor libraries for this crate's own tests.
 ///
@@ -25,16 +26,23 @@ extern crate blas_src as _;
 extern crate lapack_src as _;
 
 /// The vendor symbols a scalar needs, sealed away from the public bound.
-mod symbols {
+#[doc(hidden)]
+pub mod symbols {
     /// The LAPACK routines and scalar literals this crate needs.
     ///
-    /// `pub` so it can be a supertrait of [`crate::LapackScalar`] while staying inside this private
-    /// module: callers cannot implement it, and its signatures stay free to change.
+    /// `pub` only so [`crate::LapackScalar`] can name its associated types; sealed by
+    /// [`tlinalg_traits::Scalar`], which no new type can implement, and by the orphan rule for the
+    /// existing ones.
     pub trait Symbols: tlinalg_traits::Scalar + Default + PartialEq {
+        /// The real scalar this type's singular values live in.
+        type Real: tlinalg_traits::Scalar + Default + PartialEq;
+
         /// `1` in this scalar.
         fn one() -> Self;
         /// `-1` in this scalar.
         fn minus_one() -> Self;
+        /// The `lwork` a workspace query returned, as a real scalar.
+        fn work_query_len(query: Self) -> f64;
         /// `?getrf`: factor one column-major `m x n` matrix in place.
         fn getrf(m: i32, n: i32, data: &mut [Self], lda: i32, ipiv: &mut [i32], info: &mut i32);
         /// `?getrs`: solve `op(A) X = B` from `?getrf` factors.
@@ -52,17 +60,45 @@ mod symbols {
         );
         /// Conjugate every element in place; a no-op for real scalars.
         fn conj_in_place(_data: &mut [Self]) {}
+
+        /// `?gesdd`: divide-and-conquer SVD of one column-major `m x n` matrix in place.
+        ///
+        /// `rwork` is unused by the real routines and empty for them; the complex ones require it.
+        #[allow(clippy::too_many_arguments)]
+        fn gesdd(
+            jobz: u8,
+            m: i32,
+            n: i32,
+            a: &mut [Self],
+            lda: i32,
+            s: &mut [Self::Real],
+            u: &mut [Self],
+            ldu: i32,
+            vt: &mut [Self],
+            ldvt: i32,
+            work: &mut [Self],
+            lwork: i32,
+            rwork: &mut [Self::Real],
+            iwork: &mut [i32],
+            info: &mut i32,
+        );
     }
 
     macro_rules! impl_real_symbols {
-        ($scalar:ty, $getrf:path, $getrs:path) => {
+        ($scalar:ty, $getrf:path, $getrs:path, $gesdd:path) => {
             impl Symbols for $scalar {
+                type Real = $scalar;
+
                 fn one() -> Self {
                     1.0
                 }
 
                 fn minus_one() -> Self {
                     -1.0
+                }
+
+                fn work_query_len(query: Self) -> f64 {
+                    query as f64
                 }
 
                 fn getrf(
@@ -97,19 +133,52 @@ mod symbols {
                         $getrs(trans, n, nrhs, a, lda, ipiv, b, ldb, info);
                     }
                 }
+
+                fn gesdd(
+                    jobz: u8,
+                    m: i32,
+                    n: i32,
+                    a: &mut [Self],
+                    lda: i32,
+                    s: &mut [Self::Real],
+                    u: &mut [Self],
+                    ldu: i32,
+                    vt: &mut [Self],
+                    ldvt: i32,
+                    work: &mut [Self],
+                    lwork: i32,
+                    _rwork: &mut [Self::Real],
+                    iwork: &mut [i32],
+                    info: &mut i32,
+                ) {
+                    // SAFETY: callers validate the dimensions and layouts and supply buffers of the
+                    // lengths LAPACK documents; `lwork = -1` with a one-element `work` is the
+                    // workspace query.
+                    unsafe {
+                        $gesdd(
+                            jobz, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, iwork, info,
+                        );
+                    }
+                }
             }
         };
     }
 
     macro_rules! impl_complex_symbols {
-        ($scalar:ty, $getrf:path, $getrs:path) => {
+        ($scalar:ty, $real:ty, $getrf:path, $getrs:path, $gesdd:path) => {
             impl Symbols for $scalar {
+                type Real = $real;
+
                 fn one() -> Self {
                     Self::new(1.0, 0.0)
                 }
 
                 fn minus_one() -> Self {
                     Self::new(-1.0, 0.0)
+                }
+
+                fn work_query_len(query: Self) -> f64 {
+                    query.re as f64
                 }
 
                 fn getrf(
@@ -148,14 +217,53 @@ mod symbols {
                         *value = value.conj();
                     }
                 }
+
+                fn gesdd(
+                    jobz: u8,
+                    m: i32,
+                    n: i32,
+                    a: &mut [Self],
+                    lda: i32,
+                    s: &mut [Self::Real],
+                    u: &mut [Self],
+                    ldu: i32,
+                    vt: &mut [Self],
+                    ldvt: i32,
+                    work: &mut [Self],
+                    lwork: i32,
+                    rwork: &mut [Self::Real],
+                    iwork: &mut [i32],
+                    info: &mut i32,
+                ) {
+                    // SAFETY: as in the real case; the complex routines additionally require
+                    // `rwork` of the length LAPACK documents.
+                    unsafe {
+                        $gesdd(
+                            jobz, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, rwork, iwork,
+                            info,
+                        );
+                    }
+                }
             }
         };
     }
 
-    impl_real_symbols!(f32, lapack::sgetrf, lapack::sgetrs);
-    impl_real_symbols!(f64, lapack::dgetrf, lapack::dgetrs);
-    impl_complex_symbols!(num_complex::Complex32, lapack::cgetrf, lapack::cgetrs);
-    impl_complex_symbols!(num_complex::Complex64, lapack::zgetrf, lapack::zgetrs);
+    impl_real_symbols!(f32, lapack::sgetrf, lapack::sgetrs, lapack::sgesdd);
+    impl_real_symbols!(f64, lapack::dgetrf, lapack::dgetrs, lapack::dgesdd);
+    impl_complex_symbols!(
+        num_complex::Complex32,
+        f32,
+        lapack::cgetrf,
+        lapack::cgetrs,
+        lapack::cgesdd
+    );
+    impl_complex_symbols!(
+        num_complex::Complex64,
+        f64,
+        lapack::zgetrf,
+        lapack::zgetrs,
+        lapack::zgesdd
+    );
 }
 
 /// A scalar this crate has LAPACK bindings for.
