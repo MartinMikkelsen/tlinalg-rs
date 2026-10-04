@@ -95,13 +95,30 @@ fn work_len(op: Op, routine: &'static str, query: f64) -> Result<i32> {
     dim_i32(op, query.ceil() as usize)
 }
 
-/// `?gesdd`'s integer workspace length.
-fn gesdd_iwork_len(op: Op, k: usize) -> Result<usize> {
+/// The integer workspace length the selected driver needs.
+///
+/// `?gesdd` needs `8 * max(k, 1)`; `?gesvd` has no integer workspace at all.
+#[cfg(not(feature = "provider-inject"))]
+fn iwork_len(op: Op, k: usize) -> Result<usize> {
     checked_product(op, "integer workspace", &[8, k.max(1)])
 }
 
-/// `?gesdd`'s real workspace length for complex input.
-fn complex_gesdd_rwork_len(op: Op, jobz: u8, m: usize, n: usize) -> Result<usize> {
+#[cfg(feature = "provider-inject")]
+fn iwork_len(_op: Op, _k: usize) -> Result<usize> {
+    Ok(0)
+}
+
+/// The real workspace length the selected driver needs for complex input.
+///
+/// `?gesvd` takes a fixed `5 * max(k, 1)`; `?gesdd` needs the length LAPACK documents, which grows
+/// with the shape unless the larger dimension exceeds a crossover.
+#[cfg(feature = "provider-inject")]
+fn complex_rwork_len(op: Op, _jobz: u8, m: usize, n: usize) -> Result<usize> {
+    checked_product(op, "real workspace", &[5, m.min(n).max(1)])
+}
+
+#[cfg(not(feature = "provider-inject"))]
+fn complex_rwork_len(op: Op, jobz: u8, m: usize, n: usize) -> Result<usize> {
     let mn = m.min(n);
     let mx = m.max(n);
     if jobz == b'N' {
@@ -238,12 +255,12 @@ where
     let m_i32 = dim_i32(op, m)?;
     let n_i32 = dim_i32(op, n)?;
     let (ldu, ldvt) = (layout.ldu, layout.ldvt);
-    let mut iwork = workspace.acquire_zeroed_index(gesdd_iwork_len(op, layout.k)?);
+    let mut iwork = workspace.acquire_zeroed_index(iwork_len(op, layout.k)?);
     // The real routines have no real workspace at all; the complex ones need one of a computed
     // length, held for the whole batch alongside `work` and `iwork`.
     let complex = std::mem::size_of::<T>() != std::mem::size_of::<T::Real>();
     let mut rwork = if complex {
-        workspace.acquire_zeroed(complex_gesdd_rwork_len(op, job, m, n)?)
+        workspace.acquire_zeroed(complex_rwork_len(op, job, m, n)?)
     } else {
         Vec::new()
     };
@@ -251,24 +268,24 @@ where
     let mut info = 0;
     {
         let (a0, s0, u0, vt0) = layout.chunk(0, a, s, u, vt);
-        T::gesdd(
-            job, m_i32, n_i32, a0, m_i32, s0, u0, ldu, vt0, ldvt, &mut query, -1, &mut rwork,
+        T::svd_driver(
+            job, job, m_i32, n_i32, a0, m_i32, s0, u0, ldu, vt0, ldvt, &mut query, -1, &mut rwork,
             &mut iwork, &mut info,
         );
     }
-    check_info(op, "gesdd(work query)", info)?;
-    let lwork = work_len(op, "gesdd", T::work_query_len(query[0]))?;
+    check_info(op, "svd(work query)", info)?;
+    let lwork = work_len(op, "svd", T::work_query_len(query[0]))?;
     let mut work = workspace.acquire_zeroed(lwork as usize);
     // INVARIANT: every buffer was checked to hold `layout.batch` blocks and the workspace depends
     // only on `(mode, m, n)`, so it is reused across the batch. The serial loop is intentional:
     // LAPACK owns threading inside each call.
     for index in 0..layout.batch {
         let (a_i, s_i, u_i, vt_i) = layout.chunk(index, a, s, u, vt);
-        T::gesdd(
-            job, m_i32, n_i32, a_i, m_i32, s_i, u_i, ldu, vt_i, ldvt, &mut work, lwork, &mut rwork,
-            &mut iwork, &mut info,
+        T::svd_driver(
+            job, job, m_i32, n_i32, a_i, m_i32, s_i, u_i, ldu, vt_i, ldvt, &mut work, lwork,
+            &mut rwork, &mut iwork, &mut info,
         );
-        check_info(op, "gesdd", info)?;
+        check_info(op, "svd", info)?;
     }
     workspace.release_index(iwork);
     workspace.release(work);

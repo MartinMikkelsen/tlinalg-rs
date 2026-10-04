@@ -61,12 +61,19 @@ pub mod symbols {
         /// Conjugate every element in place; a no-op for real scalars.
         fn conj_in_place(_data: &mut [Self]) {}
 
-        /// `?gesdd`: divide-and-conquer SVD of one column-major `m x n` matrix in place.
+        /// The SVD driver for one column-major `m x n` matrix, in place.
         ///
-        /// `rwork` is unused by the real routines and empty for them; the complex ones require it.
+        /// `jobu` and `jobvt` are the two job letters `?gesvd` takes; `?gesdd` shares one letter, so
+        /// it is given `jobu`. Which routine is called is a compiled-in choice: without
+        /// `provider-inject` this is `?gesdd`, and with it `?gesvd`, because the injected LAPACK
+        /// symbol set exports `?gesvd` only.
+        ///
+        /// `rwork` is empty for the real routines and required by the complex ones; `iwork` is
+        /// required by `?gesdd` and ignored by `?gesvd`.
         #[allow(clippy::too_many_arguments)]
-        fn gesdd(
-            jobz: u8,
+        fn svd_driver(
+            jobu: u8,
+            jobvt: u8,
             m: i32,
             n: i32,
             a: &mut [Self],
@@ -85,7 +92,7 @@ pub mod symbols {
     }
 
     macro_rules! impl_real_symbols {
-        ($scalar:ty, $getrf:path, $getrs:path, $gesdd:path) => {
+        ($scalar:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path) => {
             impl Symbols for $scalar {
                 type Real = $scalar;
 
@@ -134,8 +141,9 @@ pub mod symbols {
                     }
                 }
 
-                fn gesdd(
-                    jobz: u8,
+                fn svd_driver(
+                    jobu: u8,
+                    jobvt: u8,
                     m: i32,
                     n: i32,
                     a: &mut [Self],
@@ -151,12 +159,25 @@ pub mod symbols {
                     iwork: &mut [i32],
                     info: &mut i32,
                 ) {
+                    // The driver is a compiled-in choice: the injected LAPACK symbol set exports
+                    // `?gesvd` but not `?gesdd`.
+                    #[cfg(feature = "provider-inject")]
+                    let _ = iwork;
+                    #[cfg(not(feature = "provider-inject"))]
+                    let _ = jobvt;
                     // SAFETY: callers validate the dimensions and layouts and supply buffers of the
                     // lengths LAPACK documents; `lwork = -1` with a one-element `work` is the
                     // workspace query.
+                    #[cfg(not(feature = "provider-inject"))]
                     unsafe {
                         $gesdd(
-                            jobz, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, iwork, info,
+                            jobu, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, iwork, info,
+                        );
+                    }
+                    #[cfg(feature = "provider-inject")]
+                    unsafe {
+                        $gesvd(
+                            jobu, jobvt, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, info,
                         );
                     }
                 }
@@ -165,7 +186,7 @@ pub mod symbols {
     }
 
     macro_rules! impl_complex_symbols {
-        ($scalar:ty, $real:ty, $getrf:path, $getrs:path, $gesdd:path) => {
+        ($scalar:ty, $real:ty, $getrf:path, $getrs:path, $gesdd:path, $gesvd:path) => {
             impl Symbols for $scalar {
                 type Real = $real;
 
@@ -218,8 +239,9 @@ pub mod symbols {
                     }
                 }
 
-                fn gesdd(
-                    jobz: u8,
+                fn svd_driver(
+                    jobu: u8,
+                    jobvt: u8,
                     m: i32,
                     n: i32,
                     a: &mut [Self],
@@ -235,11 +257,24 @@ pub mod symbols {
                     iwork: &mut [i32],
                     info: &mut i32,
                 ) {
+                    // The driver is a compiled-in choice, as in the real case.
+                    #[cfg(feature = "provider-inject")]
+                    let _ = iwork;
+                    #[cfg(not(feature = "provider-inject"))]
+                    let _ = jobvt;
                     // SAFETY: as in the real case; the complex routines additionally require
                     // `rwork` of the length LAPACK documents.
+                    #[cfg(not(feature = "provider-inject"))]
                     unsafe {
                         $gesdd(
-                            jobz, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, rwork, iwork,
+                            jobu, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, rwork, iwork,
+                            info,
+                        );
+                    }
+                    #[cfg(feature = "provider-inject")]
+                    unsafe {
+                        $gesvd(
+                            jobu, jobvt, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, rwork,
                             info,
                         );
                     }
@@ -248,21 +283,35 @@ pub mod symbols {
         };
     }
 
-    impl_real_symbols!(f32, lapack::sgetrf, lapack::sgetrs, lapack::sgesdd);
-    impl_real_symbols!(f64, lapack::dgetrf, lapack::dgetrs, lapack::dgesdd);
+    impl_real_symbols!(
+        f32,
+        lapack::sgetrf,
+        lapack::sgetrs,
+        lapack::sgesdd,
+        lapack::sgesvd
+    );
+    impl_real_symbols!(
+        f64,
+        lapack::dgetrf,
+        lapack::dgetrs,
+        lapack::dgesdd,
+        lapack::dgesvd
+    );
     impl_complex_symbols!(
         num_complex::Complex32,
         f32,
         lapack::cgetrf,
         lapack::cgetrs,
-        lapack::cgesdd
+        lapack::cgesdd,
+        lapack::cgesvd
     );
     impl_complex_symbols!(
         num_complex::Complex64,
         f64,
         lapack::zgetrf,
         lapack::zgetrs,
-        lapack::zgesdd
+        lapack::zgesdd,
+        lapack::zgesvd
     );
 }
 
