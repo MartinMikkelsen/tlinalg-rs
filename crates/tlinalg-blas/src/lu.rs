@@ -110,7 +110,11 @@ fn factor_one<T: LapackScalar>(
     reject_singular: bool,
 ) -> Result<()> {
     let mut info = 0;
-    T::getrf(m_i32, n_i32, matrix, m_i32, ipiv, &mut info);
+    // SAFETY: `matrix` is a compact column-major `m x n` block of this call's `lu`, `ipiv` holds
+    // `min(m, n)` pivots, and `m_i32`/`n_i32` were derived from those lengths.
+    unsafe {
+        T::getrf(m_i32, n_i32, matrix, m_i32, ipiv, &mut info);
+    }
     check_info(op, "getrf", info.min(0))?;
     if reject_singular && info > 0 {
         return Err(Error::Singular { op });
@@ -239,9 +243,13 @@ pub fn solve_prepared_chunk<T: LapackScalar>(
         .zip(output.chunks_exact_mut(rhs_len))
     {
         let mut info = 0;
-        T::getrs(
-            trans, n_i32, nrhs_i32, matrix, n_i32, ipiv, rhs, n_i32, &mut info,
-        );
+        // SAFETY: `matrix` and `ipiv` are this item's matching `?getrf` factor, `rhs` is its
+        // `n x nrhs` right-hand side, and the dimensions were derived from those lengths.
+        unsafe {
+            T::getrs(
+                trans, n_i32, nrhs_i32, matrix, n_i32, ipiv, rhs, n_i32, &mut info,
+            );
+        }
         check_info(op, "getrs", info)?;
     }
     if conjugate_rhs {
@@ -307,9 +315,12 @@ pub fn factor_solve_chunk<T: LapackScalar>(
     {
         factor_one::<T>(op, n_i32, n_i32, matrix, ipiv, None, true)?;
         let mut info = 0;
-        T::getrs(
-            b'N', n_i32, nrhs_i32, matrix, n_i32, ipiv, rhs, n_i32, &mut info,
-        );
+        // SAFETY: this item's factor, pivots and right-hand side, as the prepared solve validates.
+        unsafe {
+            T::getrs(
+                b'N', n_i32, nrhs_i32, matrix, n_i32, ipiv, rhs, n_i32, &mut info,
+            );
+        }
         check_info(op, "getrs", info)?;
     }
     Ok(())

@@ -255,12 +255,24 @@ where
     let m_i32 = dim_i32(op, m)?;
     let n_i32 = dim_i32(op, n)?;
     let (ldu, ldvt) = (layout.ldu, layout.ldvt);
-    let mut iwork = workspace.acquire_zeroed_index(iwork_len(op, layout.k)?);
+    let iwork_len = iwork_len(op, layout.k)?;
+    // `?gesvd` has no integer workspace at all, so it must not touch the pool for one: taking an
+    // integer buffer and returning it would churn the retained capacity of a pool it never used.
+    let mut iwork = if iwork_len > 0 {
+        workspace.acquire_zeroed_index(iwork_len)
+    } else {
+        Vec::new()
+    };
     // The real routines have no real workspace at all; the complex ones need one of a computed
     // length, held for the whole batch alongside `work` and `iwork`.
     let complex = std::mem::size_of::<T>() != std::mem::size_of::<T::Real>();
-    let mut rwork = if complex {
-        workspace.acquire_zeroed(complex_rwork_len(op, job, m, n)?)
+    let rwork_len = if complex {
+        complex_rwork_len(op, job, m, n)?
+    } else {
+        0
+    };
+    let mut rwork = if rwork_len > 0 {
+        workspace.acquire_zeroed(rwork_len)
     } else {
         Vec::new()
     };
@@ -270,28 +282,45 @@ where
     let mut info = 0;
     {
         let (a0, s0, u0, vt0) = layout.chunk(0, a, s, u, vt);
-        T::svd_driver(
-            job, job, m_i32, n_i32, a0, m_i32, s0, u0, ldu, vt0, ldvt, &mut query, -1, &mut rwork,
-            &mut iwork, &mut info,
-        );
+        // SAFETY: every buffer is sized for this item as documented above.
+        unsafe {
+            T::svd_driver(
+                job, job, m_i32, n_i32, a0, m_i32, s0, u0, ldu, vt0, ldvt, &mut query, -1,
+                &mut rwork, &mut iwork, &mut info,
+            );
+        }
     }
     check_info(op, "svd(work query)", info)?;
-    let lwork = work_len(op, "svd", T::work_query_len(query[0]))?;
+    let lwork = work_len(op, T::routine_name(), T::work_query_len(query[0]))?;
     let mut work = workspace.acquire_zeroed(lwork as usize);
+    // A `Workspace` implementation is safe code and may return anything, but LAPACK writes into
+    // these buffers up to the lengths it was told, so the host's promise is checked here rather
+    // than trusted at a raw FFI boundary.
+    if work.len() < lwork as usize || iwork.len() < iwork_len || rwork.len() < rwork_len {
+        return Err(Error::Inconsistent {
+            op,
+            detail: "the workspace returned fewer elements than the routine requires",
+        });
+    }
     // INVARIANT: every buffer was checked to hold `layout.batch` blocks and the workspace depends
     // only on `(mode, m, n)`, so it is reused across the batch. The serial loop is intentional:
     // LAPACK owns threading inside each call.
     for index in 0..layout.batch {
         let (a_i, s_i, u_i, vt_i) = layout.chunk(index, a, s, u, vt);
-        T::svd_driver(
-            job, job, m_i32, n_i32, a_i, m_i32, s_i, u_i, ldu, vt_i, ldvt, &mut work, lwork,
-            &mut rwork, &mut iwork, &mut info,
-        );
-        check_info(op, "svd", info)?;
+        // SAFETY: every buffer is sized for this item as documented above.
+        unsafe {
+            T::svd_driver(
+                job, job, m_i32, n_i32, a_i, m_i32, s_i, u_i, ldu, vt_i, ldvt, &mut work, lwork,
+                &mut rwork, &mut iwork, &mut info,
+            );
+        }
+        check_info(op, T::routine_name(), info)?;
     }
-    workspace.release_index(iwork);
     workspace.release(work);
-    if complex {
+    if iwork_len > 0 {
+        workspace.release_index(iwork);
+    }
+    if rwork_len > 0 {
         workspace.release(rwork);
     }
     Ok(())
