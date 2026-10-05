@@ -1,0 +1,26 @@
+[package]
+name = "tlinalg-parity"
+description = "Dev-only cross-provider parity tests: the same cases through tlinalg (faer) and tlinalg-blas (LAPACK)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+# Link OpenBLAS so the LAPACK half can run. Without it the parity tests compile to nothing.
+link-openblas = ["tlinalg-blas/link-openblas"]
+
+[dependencies]
+tlinalg = { workspace = true }
+tlinalg-blas = { workspace = true }
+tlinalg-testkit = { workspace = true }
+num-complex = { workspace = true }
+rayon = { workspace = true }
+strided-view = { workspace = true }
+
+[lints]
+workspace = true

@@ -3,6 +3,7 @@ members = [
     "crates/tlinalg",
     "crates/tlinalg-blas",
     "crates/tlinalg-testkit",
+    "crates/tlinalg-parity",
 ]
 resolver = "2"
 

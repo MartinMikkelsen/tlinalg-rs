@@ -12,8 +12,12 @@ placement, execution context and error wrapping.
 |---|---|
 | `tlinalg` | The faer-backed provider, with the batch-direction lane fan-out on the caller's rayon pool. |
 | `tlinalg-blas` | The LAPACK/BLAS provider: vendor calls and their argument marshalling, a serial batch loop, vendor-owned threading. |
+| `tlinalg-testkit` | Dev-only, unpublished: provider-neutral test helpers (scalar test trait, generators, reference arithmetic, batched layouts, counting allocator). |
+| `tlinalg-parity` | Dev-only, unpublished: the same batched cases through both providers, compared gauge-aware. |
 
 The two providers are siblings: neither depends on the other, and each owns its own vocabulary.
+The dev-only crates depend on the providers, never the other way round (`tlinalg-testkit` is only
+ever a `[dev-dependencies]` entry of a provider).
 
 `tlinalg` is the faer-backed provider. It owns batched kernels (SVD, packed LU, Cholesky,
 triangular solve, LU and solve, full-pivot LU, QR and column-pivoted QR, Hermitian and general
@@ -52,15 +56,28 @@ interface and the package names settle.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas -- -D warnings
-cargo test -j 16 --workspace --features tlinalg-blas/link-openblas
-cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject
+cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas -- -D warnings
+cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas
+cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas
 ```
 
 `link-openblas` exists only so `tlinalg-blas` has an executable check of its own; it builds OpenBLAS
 from source through `openblas-src`. Tenferro selects the vendor and the injected-symbol path
 itself, so the feature is not part of the implementation contract. Without it the workspace still
-builds and lints; the LAPACK tests are skipped.
+builds and lints; the LAPACK tests are skipped. `tlinalg-parity/link-openblas` turns on the
+cross-provider parity suite, which needs both providers to run.
+
+## Parity
+
+`tlinalg-parity` runs every family (SVD thin/full/values, Cholesky, triangular solve in all flag
+combinations, LU, solve, full-pivot LU and its solve, QR, column-pivoted QR, `eigh`/`eigvalsh`,
+`eig`/`eigvals`, packed LU factor/prepared/fused solve, and the compact Householder pair) through
+both providers for `f32`, `f64`, `Complex32` and `Complex64`, over batch shapes `[]`, `[3]` and
+`[2, 3]` (gapped, so no axis merges, and with transposed batch strides), plus a stride-0 broadcast
+coefficient for the binary families. What is unique is compared directly (singular values,
+eigenvalues as a multiset, Cholesky factors, solutions, permutation-convention LU factors, QR factors
+after fixing the `R` diagonal phase); the rest is checked by reconstruction against each
+provider's documented convention.
 
 ## License
 
