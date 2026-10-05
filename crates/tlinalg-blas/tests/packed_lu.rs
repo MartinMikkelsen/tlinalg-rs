@@ -9,8 +9,8 @@
 #![cfg(feature = "link-openblas")]
 
 use num_complex::Complex64;
-use tlinalg_blas::lu::{factor_chunk, factor_solve_chunk, solve_prepared_chunk, validate_pivots};
-use tlinalg_traits::{Error, Op, Parallel};
+use tlinalg_blas::lu::{lu_factor, lu_factor_solve, lu_solve_prepared, validate_pivots};
+use tlinalg_blas::{Error, Op};
 
 /// Full-rank column-major `n x n` matrix whose leading entry is zero, so pivoting happens.
 fn matrix(n: usize) -> Vec<f64> {
@@ -82,21 +82,12 @@ fn factor_one(a: &[f64], n: usize) -> (Vec<f64>, Vec<i32>, f64) {
     let mut packed = a.to_vec();
     let mut pivots = vec![0i32; n];
     let mut parity = vec![0.0f64; 1];
-    factor_chunk(
-        Op::LuFactor,
-        n,
-        n,
-        &mut packed,
-        &mut pivots,
-        &mut parity,
-        Parallel::Sequential,
-    )
-    .unwrap();
+    lu_factor(Op::LuFactor, n, n, &mut packed, &mut pivots, &mut parity).unwrap();
     (packed, pivots, parity[0])
 }
 
 #[test]
-fn factor_chunk_reproduces_the_input_and_the_parity() {
+fn lu_factor_reproduces_the_input_and_the_parity() {
     for n in [1usize, 3, 5] {
         let a = matrix(n);
         let (packed, pivots, parity) = factor_one(&a, n);
@@ -132,7 +123,7 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
 
     // Plain: A x = b.
     let mut out = matvec(&a, n, &x_true);
-    solve_prepared_chunk(
+    lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         1,
@@ -141,7 +132,6 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
         &mut out,
         false,
         false,
-        Parallel::Sequential,
     )
     .unwrap();
     for (got, want) in out.iter().zip(x_true.iter()) {
@@ -156,7 +146,7 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
         }
     }
     let mut out = matvec(&a_t, n, &x_true);
-    solve_prepared_chunk(
+    lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         1,
@@ -165,7 +155,6 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
         &mut out,
         true,
         false,
-        Parallel::Sequential,
     )
     .unwrap();
     for (got, want) in out.iter().zip(x_true.iter()) {
@@ -176,7 +165,7 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
     let x2 = [-0.5, 1.5, 2.0, -1.0];
     let mut rhs = matvec(&a, n, &x_true);
     rhs.extend(matvec(&a, n, &x2));
-    solve_prepared_chunk(
+    lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         2,
@@ -185,7 +174,6 @@ fn prepared_solve_recovers_a_known_solution_for_every_flag_combination() {
         &mut rhs,
         false,
         false,
-        Parallel::Sequential,
     )
     .unwrap();
     for (got, want) in rhs[..n].iter().zip(x_true.iter()) {
@@ -209,16 +197,7 @@ fn conjugated_solve_solves_the_adjoint() {
     let mut packed = a.clone();
     let mut pivots = vec![0i32; n];
     let mut parity = vec![Complex64::new(0.0, 0.0); 1];
-    factor_chunk(
-        Op::LuFactor,
-        n,
-        n,
-        &mut packed,
-        &mut pivots,
-        &mut parity,
-        Parallel::Sequential,
-    )
-    .unwrap();
+    lu_factor(Op::LuFactor, n, n, &mut packed, &mut pivots, &mut parity).unwrap();
 
     let x_true: Vec<Complex64> = [1.0, -2.0, 0.5]
         .into_iter()
@@ -231,7 +210,7 @@ fn conjugated_solve_solves_the_adjoint() {
                 .sum()
         })
         .collect();
-    solve_prepared_chunk(
+    lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         1,
@@ -240,7 +219,6 @@ fn conjugated_solve_solves_the_adjoint() {
         &mut rhs,
         false,
         true,
-        Parallel::Sequential,
     )
     .unwrap();
     for (got, want) in rhs.iter().zip(x_true.iter()) {
@@ -257,7 +235,7 @@ fn factor_solve_matches_factor_then_solve() {
 
     let (reference_packed, reference_pivots, _) = factor_one(&a, n);
     let mut expected = b.clone();
-    solve_prepared_chunk(
+    lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         1,
@@ -266,21 +244,19 @@ fn factor_solve_matches_factor_then_solve() {
         &mut expected,
         false,
         false,
-        Parallel::Sequential,
     )
     .unwrap();
 
     let mut fused = a.clone();
     let mut pivots = vec![0i32; n];
     let mut solved = b.clone();
-    factor_solve_chunk(
+    lu_factor_solve(
         Op::LuFactorSolve,
         n,
         1,
         &mut fused,
         &mut pivots,
         &mut solved,
-        Parallel::Sequential,
     )
     .unwrap();
 
@@ -298,30 +274,21 @@ fn singular_input_is_rejected_only_when_a_rhs_is_present() {
     let mut packed = a;
     let mut pivots = vec![0i32; n];
     let mut no_rhs: Vec<f64> = Vec::new();
-    factor_solve_chunk(
+    lu_factor_solve(
         Op::LuFactorSolve,
         n,
         0,
         &mut packed,
         &mut pivots,
         &mut no_rhs,
-        Parallel::Sequential,
     )
     .unwrap();
 
     let mut packed = a;
     let mut pivots = vec![0i32; n];
     let mut rhs = vec![1.0f64; n];
-    let error = factor_solve_chunk(
-        Op::LuFactorSolve,
-        n,
-        1,
-        &mut packed,
-        &mut pivots,
-        &mut rhs,
-        Parallel::Sequential,
-    )
-    .unwrap_err();
+    let error =
+        lu_factor_solve(Op::LuFactorSolve, n, 1, &mut packed, &mut pivots, &mut rhs).unwrap_err();
     assert!(matches!(
         error,
         Error::Singular {
@@ -341,7 +308,7 @@ fn invalid_pivots_are_rejected_before_any_write() {
     ));
     let mut output = vec![1.0f64; n];
     let before = output.clone();
-    let error = solve_prepared_chunk(
+    let error = lu_solve_prepared(
         Op::LuSolvePrepared,
         n,
         1,
@@ -350,7 +317,6 @@ fn invalid_pivots_are_rejected_before_any_write() {
         &mut output,
         false,
         false,
-        Parallel::Sequential,
     )
     .unwrap_err();
     assert!(matches!(
@@ -366,14 +332,5 @@ fn empty_batches_are_accepted() {
     let mut lu: Vec<f64> = Vec::new();
     let mut pivots: Vec<i32> = Vec::new();
     let mut parity: Vec<f64> = Vec::new();
-    factor_chunk(
-        Op::LuFactor,
-        n,
-        n,
-        &mut lu,
-        &mut pivots,
-        &mut parity,
-        Parallel::Sequential,
-    )
-    .unwrap();
+    lu_factor(Op::LuFactor, n, n, &mut lu, &mut pivots, &mut parity).unwrap();
 }

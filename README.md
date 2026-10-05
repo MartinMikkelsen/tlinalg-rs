@@ -1,7 +1,6 @@
 # tlinalg-blas-rs
 
-LAPACK/BLAS-backed implementation of the `tlinalg` tensor-free numerical interface
-([`tlinalg-traits`](https://github.com/tensor4all/tlinalg-rs)).
+LAPACK/BLAS-backed tensor-free linear algebra kernels for the Tensor4all stack.
 
 ## Crates
 
@@ -11,19 +10,18 @@ LAPACK/BLAS-backed implementation of the `tlinalg` tensor-free numerical interfa
 
 ## Contract
 
-Like the faer-backed implementation, this crate owns the kernels and nothing else. The host supplies
-borrowed operands, a `Parallel` token and a host-resolved `LanePlan`; the host keeps policy, error
-classification, placement, allocation and session entry.
+The crate owns the vendor calls, their argument marshalling and the batch loop; the host keeps
+policy, error classification, placement, tensor construction and session entry. It owns its own
+vocabulary (`Error`, `Op`, `Workspace`, `IndexWorkspace`, `Scalar`); the interface tenferro requires
+lives in tenferro.
 
-Two properties are deliberate here:
-
-- **Read-only threading.** LAPACK and BLAS own their own parallelism, so the `Parallel` token is
-  accepted for interface parity and **ignored**, no Rayon fan-out is created around a vendor batch,
-  and the batch loops are serial.
-- **No scratch.** The packed-LU family takes no pooled buffers, so it does not need `Workspace`.
-
-`validate_pivots` is public so a host can validate a whole batch before splitting it into chunks: an
-invalid pivot must be reported before any chunk mutates its output.
+- **Batched.** Every family is called once per batch with a rank `2 + B` strided operand
+  `[rows, cols, batch...]` (stride-0 batch axes broadcast an input). Outputs are compact and
+  batch-contiguous, cleared and then filled, and left empty on error; the error is the one of the
+  first failing item in batch order.
+- **Vendor-owned threading.** No entry point takes a parallelism token; the batch loop is serial.
+- **One workspace query per call.** Scratch comes from the host's `Workspace`, is acquired once per
+  call and reused for every item.
 
 ## Build and test
 
@@ -39,11 +37,9 @@ the feature is not part of the implementation contract.
 
 ## Status
 
-Only the packed-LU family (`lu_factor`, `lu_solve_prepared`, `lu_factor_solve`) is extracted so far.
-Full-pivot LU, ordinary LU/solve, triangular solve, Cholesky, QR, `eigh`, `eig` and the Householder
-family are later slices of [tenferro-rs#1956](https://github.com/tensor4all/tenferro-rs/issues/1956).
-
-Nothing is published; `publish = false` until the interface and the package names settle.
+Every CPU family tenferro's LAPACK route uses is here: SVD, packed and explicit LU, solve (owned and
+direct-output), full-pivot LU and its solve, triangular solve, Cholesky, QR, rank-revealing QR,
+`eigh`, `eig`, and the compact Householder kernels. Nothing is published; `publish = false`.
 
 ## License
 

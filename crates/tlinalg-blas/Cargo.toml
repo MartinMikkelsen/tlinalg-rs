@@ -1,6 +1,6 @@
 [package]
 name = "tlinalg-blas"
-description = "LAPACK/BLAS-backed implementation of the tlinalg tensor-free numerical interface."
+description = "LAPACK/BLAS-backed tensor-free linear algebra kernels for the Tensor4all stack."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,8 +19,10 @@ provider-inject = []
 link-openblas = ["dep:blas-src", "dep:lapack-src"]
 
 [dependencies]
-tlinalg-traits = { workspace = true }
 lapack = { workspace = true }
+cblas-sys = { workspace = true }
+strided-view = { workspace = true }
+thiserror = { workspace = true }
 num-complex = { workspace = true }
 
 [dependencies.blas-src]
