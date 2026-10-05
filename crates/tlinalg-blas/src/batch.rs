@@ -11,6 +11,71 @@ use strided_view::{RawStridedMut, RawStridedRef};
 
 use crate::{Error, Op, Result};
 
+/// Normalised batch axes kept inline; only a view with more non-mergeable axes spills to the heap.
+const INLINE_AXES: usize = 8;
+
+/// A list of up to `N` elements stored inline, spilling to the heap only beyond `N`.
+///
+/// The batch driver must not allocate per call: a compact batch normalises to at most one axis and
+/// real views rarely have more than a handful, so the inline capacity covers every practical case.
+#[derive(Clone, Debug)]
+pub(crate) struct SmallList<T: Copy + Default, const N: usize> {
+    inline: [T; N],
+    len: usize,
+    /// Holds every element once `len` exceeds `N`; empty (no allocation) until then.
+    spill: Vec<T>,
+}
+
+impl<T: Copy + Default, const N: usize> SmallList<T, N> {
+    pub(crate) fn new() -> Self {
+        Self {
+            inline: [T::default(); N],
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, value: T) {
+        if self.len < N {
+            self.inline[self.len] = value;
+        } else {
+            if self.len == N {
+                self.spill.extend_from_slice(&self.inline);
+            }
+            self.spill.push(value);
+        }
+        self.len += 1;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn as_slice(&self) -> &[T] {
+        if self.len <= N {
+            &self.inline[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        if self.len <= N {
+            &mut self.inline[..self.len]
+        } else {
+            &mut self.spill
+        }
+    }
+
+    pub(crate) fn iter(&self) -> core::slice::Iter<'_, T> {
+        self.as_slice().iter()
+    }
+
+    pub(crate) fn last_mut(&mut self) -> Option<&mut T> {
+        self.as_mut_slice().last_mut()
+    }
+}
+
 /// The layout of one batched operand, without its data.
 ///
 /// The batch axes are kept as given for shape comparisons and **normalised** for iteration: size-1
@@ -26,7 +91,7 @@ pub(crate) struct Layout<'a> {
     pub(crate) col_stride: usize,
     batch_dims: &'a [usize],
     /// Normalised batch axes `(dim, stride)` for iteration.
-    axes: Vec<(usize, usize)>,
+    axes: SmallList<(usize, usize), INLINE_AXES>,
     offset: usize,
     /// The number of matrices.
     pub(crate) count: usize,
@@ -64,7 +129,7 @@ impl<'a> Layout<'a> {
                 role: "shape",
                 detail: "batch element count overflow".to_owned(),
             })?;
-        let mut axes: Vec<(usize, usize)> = Vec::with_capacity(dims.len() - 2);
+        let mut axes = SmallList::<(usize, usize), INLINE_AXES>::new();
         for (&dim, &stride) in dims[2..].iter().zip(&strides[2..]) {
             if dim == 1 {
                 continue;
@@ -98,8 +163,12 @@ impl<'a> Layout<'a> {
 
     /// The element offset of every item, in batch order.
     pub(crate) fn offsets(&self) -> Offsets {
+        let mut index = SmallList::new();
+        for _ in 0..self.axes.len() {
+            index.push(0);
+        }
         Offsets {
-            index: vec![0; self.axes.len()],
+            index,
             axes: self.axes.clone(),
             current: self.offset,
             remaining: self.count,
@@ -138,15 +207,19 @@ impl<'a> Layout<'a> {
         if self.count == 0 || self.is_empty_matrix() {
             return Ok(());
         }
-        let mut axes: Vec<(usize, usize)> =
-            [(self.rows, self.row_stride), (self.cols, self.col_stride)]
-                .into_iter()
-                .chain(self.axes.iter().copied())
-                .filter(|&(dim, _)| dim > 1)
-                .collect();
-        axes.sort_by_key(|&(_, stride)| stride);
+        let mut axes = SmallList::<(usize, usize), { INLINE_AXES + 2 }>::new();
+        for axis in [(self.rows, self.row_stride), (self.cols, self.col_stride)]
+            .into_iter()
+            .chain(self.axes.iter().copied())
+            .filter(|&(dim, _)| dim > 1)
+        {
+            axes.push(axis);
+        }
+        // Unstable: a stable sort may allocate a merge buffer.
+        axes.as_mut_slice()
+            .sort_unstable_by_key(|&(_, stride)| stride);
         let mut extent = 0usize;
-        for (dim, stride) in axes {
+        for &(dim, stride) in axes.iter() {
             if stride == 0 || stride <= extent {
                 return Err(Error::InvalidArgument {
                     op,
@@ -178,8 +251,8 @@ impl<'a> Layout<'a> {
 
 /// Item offsets in batch order (first batch dim fastest).
 pub(crate) struct Offsets {
-    axes: Vec<(usize, usize)>,
-    index: Vec<usize>,
+    axes: SmallList<(usize, usize), INLINE_AXES>,
+    index: SmallList<usize, INLINE_AXES>,
     current: usize,
     remaining: usize,
 }
@@ -194,14 +267,15 @@ impl Iterator for Offsets {
         self.remaining -= 1;
         let out = self.current;
         if self.remaining > 0 {
+            let index = self.index.as_mut_slice();
             for (axis, &(dim, stride)) in self.axes.iter().enumerate() {
-                self.index[axis] += 1;
-                if self.index[axis] < dim {
+                index[axis] += 1;
+                if index[axis] < dim {
                     self.current += stride;
                     break;
                 }
-                self.current -= stride * (self.index[axis] - 1);
-                self.index[axis] = 0;
+                self.current -= stride * (index[axis] - 1);
+                index[axis] = 0;
             }
         }
         Some(out)

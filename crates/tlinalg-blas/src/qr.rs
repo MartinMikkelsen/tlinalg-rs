@@ -249,6 +249,8 @@ where
     let mut qr = workspace.acquire_capacity(matrix_len);
     let mut tau = vec![T::default(); k];
     let mut jpvt = vec![0_i32; n];
+    // Reused per item by the permutation check.
+    let mut seen = vec![false; n];
     let mut scratch: Option<RrqrScratch<T, T::Real>> = None;
     for offset in input.layout.offsets() {
         qr.clear();
@@ -319,7 +321,7 @@ where
             );
         }
         check_info(op, T::ORGQR, info)?;
-        normalize_into(op, &jpvt, out.permutation)?;
+        normalize_into(op, &jpvt, &mut seen, out.permutation)?;
     }
     workspace.release(qr);
     if let Some(RrqrScratch { work, rwork, .. }) = scratch {
@@ -390,9 +392,14 @@ where
 
 /// Append a one-based `?geqp3` permutation as zero-based `i64` indices, rejecting anything that is
 /// not a permutation.
-fn normalize_into(op: Op, permutation: &[i32], out: &mut Vec<i64>) -> Result<()> {
+fn normalize_into(
+    op: Op,
+    permutation: &[i32],
+    seen: &mut [bool],
+    out: &mut Vec<i64>,
+) -> Result<()> {
     let n = permutation.len();
-    let mut seen = vec![false; n];
+    seen.fill(false);
     for &column in permutation {
         let zero_based = column
             .checked_sub(1)
