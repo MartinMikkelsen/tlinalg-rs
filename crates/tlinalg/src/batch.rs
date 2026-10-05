@@ -19,6 +19,7 @@
 //! partially initialised vector.
 
 use core::mem::MaybeUninit;
+use std::sync::Mutex;
 
 use faer::{MatMut, MatRef};
 use strided_view::{RawStridedMut, RawStridedRef};
@@ -40,12 +41,68 @@ fn batch_count(op: Op, batch_dims: &[usize]) -> Result<usize> {
 /// broadcasting) is kept like any other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BatchAxes {
-    axes: Vec<(usize, isize)>,
+    axes: AxisList,
+}
+
+/// Normalised axes kept inline up to [`INLINE_AXES`], on the heap only beyond that, so building a
+/// descriptor allocates nothing for any realistic batch rank.
+const INLINE_AXES: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AxisList {
+    Inline {
+        len: usize,
+        axes: [(usize, isize); INLINE_AXES],
+    },
+    Heap(Vec<(usize, isize)>),
+}
+
+impl AxisList {
+    fn new() -> Self {
+        Self::Inline {
+            len: 0,
+            axes: [(0, 0); INLINE_AXES],
+        }
+    }
+
+    fn as_slice(&self) -> &[(usize, isize)] {
+        match self {
+            Self::Inline { len, axes } => &axes[..*len],
+            Self::Heap(axes) => axes,
+        }
+    }
+
+    fn last_mut(&mut self) -> Option<&mut (usize, isize)> {
+        match self {
+            Self::Inline { len, axes } => axes[..*len].last_mut(),
+            Self::Heap(axes) => axes.last_mut(),
+        }
+    }
+
+    fn push(&mut self, axis: (usize, isize)) {
+        match self {
+            Self::Inline { len, axes } if *len < INLINE_AXES => {
+                axes[*len] = axis;
+                *len += 1;
+            }
+            Self::Inline { axes, .. } => {
+                let mut heap = axes.to_vec();
+                heap.push(axis);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(axes) => axes.push(axis),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
 }
 
 impl BatchAxes {
     pub(crate) fn new(dims: &[usize], strides: &[isize]) -> Self {
-        let mut axes: Vec<(usize, isize)> = Vec::with_capacity(dims.len());
+        let mut axes = AxisList::new();
         for (&dim, &stride) in dims.iter().zip(strides) {
             if dim == 1 {
                 continue;
@@ -86,6 +143,11 @@ impl BatchAxes {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.axes.len()
+    }
+
+    #[cfg(test)]
+    fn is_inline(&self) -> bool {
+        matches!(self.axes, AxisList::Inline { .. })
     }
 }
 
@@ -227,8 +289,15 @@ fn is_injective(dims: &[usize], strides: &[isize]) -> bool {
 }
 
 /// A raw pointer that lanes may share because they touch disjoint elements through it.
-#[derive(Clone, Copy)]
-struct SharedPtr<T>(*mut T);
+pub(crate) struct SharedPtr<T>(*mut T);
+
+impl<T> Clone for SharedPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for SharedPtr<T> {}
 
 // SAFETY: the pointer is only dereferenced through `BatchedMut::item`, whose contract gives each
 // batch item to one lane at a time, and an injective layout makes distinct items disjoint.
@@ -382,43 +451,41 @@ impl<U> Chunk<'_, U> {
     }
 }
 
-/// Split `len` elements starting at `ptr` into `lanes` consecutive pieces of `piece` elements (the
-/// last may be shorter), as slices of lifetime `'a`.
-///
-/// # Safety
-///
-/// `ptr..ptr + len` is valid for writes (and reads, once initialised) for `'a`, and nothing else
-/// accesses it while any returned slice is alive.
-unsafe fn split_raw<'a, X: 'a>(
-    ptr: *mut X,
-    len: usize,
-    piece: usize,
-    lanes: usize,
-) -> impl Iterator<Item = &'a mut [X]> {
-    (0..lanes).map(move |lane| {
-        let start = (lane * piece).min(len);
-        let end = (start + piece).min(len);
-        // SAFETY: `start..end` lies in `0..len` and distinct lanes get disjoint ranges; the
-        // caller guarantees validity and exclusivity for `'a`.
-        unsafe { core::slice::from_raw_parts_mut(ptr.add(start), end - start) }
-    })
+/// Lane `lane`'s range of a `len`-element buffer split into pieces of `piece` elements.
+fn lane_range(len: usize, piece: usize, lane: usize) -> core::ops::Range<usize> {
+    let start = lane.saturating_mul(piece).min(len);
+    start..start.saturating_add(piece).min(len)
 }
 
-/// The outputs of one batched call, split per lane.
+/// The outputs of one batched call, handed out per lane.
+///
+/// A lane's view is derived from its index on demand ([`Outputs::lane`]), so the driver builds no
+/// per-lane list: a single-lane run allocates nothing, and a multi-lane run creates each view inside
+/// its own task.
 pub(crate) trait Outputs {
+    /// Raw handles to every output, shared by the lane tasks.
+    type Parts: Sync;
     /// One lane's view of every output.
     type Lane: Send;
 
     /// Clear and reserve the vector outputs, check the in-place ones.
     fn prepare(&mut self, op: Op, batch: usize) -> Result<()>;
 
-    /// Split into one lane view per `chunk` items (`batch.div_ceil(chunk)` lanes).
+    /// The raw handles the lanes are carved from.
     ///
     /// # Safety
     ///
-    /// [`Outputs::prepare`] succeeded for this `batch`, and every returned lane is dropped before
-    /// `self` is used again (the lanes alias its buffers).
-    unsafe fn split(&mut self, batch: usize, chunk: usize) -> Vec<Self::Lane>;
+    /// [`Outputs::prepare`] succeeded for this `batch`; `self` is not used again until every lane
+    /// derived from the returned handles has been dropped.
+    unsafe fn parts(&mut self, batch: usize) -> Self::Parts;
+
+    /// Lane `lane`'s view: items `lane * chunk .. min((lane + 1) * chunk, batch)`.
+    ///
+    /// # Safety
+    ///
+    /// `parts` came from [`Outputs::parts`] for this `batch`, and no two live views share a lane
+    /// index (distinct indices give disjoint views).
+    unsafe fn lane(parts: &Self::Parts, batch: usize, chunk: usize, lane: usize) -> Self::Lane;
 
     /// Whether a lane wrote every element it owns.
     fn lane_complete(lane: &Self::Lane) -> bool;
@@ -427,7 +494,7 @@ pub(crate) trait Outputs {
     ///
     /// # Safety
     ///
-    /// Every lane returned by [`Outputs::split`] for this `batch` completed (see
+    /// Every lane `0..batch.div_ceil(chunk)` was created once, completed (see
     /// [`Outputs::lane_complete`]) and has been dropped.
     unsafe fn commit(&mut self, batch: usize);
 }
@@ -444,6 +511,7 @@ pub(crate) fn out<U>(vec: &mut Vec<U>, item_len: usize) -> Out<'_, U> {
 }
 
 impl<'a, U: Send> Outputs for Out<'a, U> {
+    type Parts = (SharedPtr<MaybeUninit<U>>, usize);
     type Lane = Sink<'a, U>;
 
     fn prepare(&mut self, op: Op, batch: usize) -> Result<()> {
@@ -453,15 +521,21 @@ impl<'a, U: Send> Outputs for Out<'a, U> {
         Ok(())
     }
 
-    unsafe fn split(&mut self, batch: usize, chunk: usize) -> Vec<Sink<'a, U>> {
-        let total = self.item_len * batch;
-        let ptr = self.vec.spare_capacity_mut().as_mut_ptr();
-        // SAFETY: `prepare` cleared the vector and reserved `total`, so its spare capacity starts at
-        // `ptr` and covers `total` elements; the caller keeps the vector untouched while the lanes
-        // live.
-        unsafe { split_raw(ptr, total, chunk * self.item_len, batch.div_ceil(chunk)) }
-            .map(|buf| Sink { buf, pos: 0 })
-            .collect()
+    unsafe fn parts(&mut self, _: usize) -> Self::Parts {
+        (
+            SharedPtr(self.vec.spare_capacity_mut().as_mut_ptr()),
+            self.item_len,
+        )
+    }
+
+    unsafe fn lane(parts: &Self::Parts, batch: usize, chunk: usize, lane: usize) -> Sink<'a, U> {
+        let (ptr, item_len) = *parts;
+        let range = lane_range(item_len * batch, chunk * item_len, lane);
+        // SAFETY: `prepare` cleared the vector and reserved `item_len * batch`, so its spare
+        // capacity starting at `ptr` covers that many elements and `range` lies inside it; the
+        // vector is not touched until the lanes are gone, and distinct lanes get disjoint ranges.
+        let buf = unsafe { core::slice::from_raw_parts_mut(ptr.0.add(range.start), range.len()) };
+        Sink { buf, pos: 0 }
     }
 
     fn lane_complete(lane: &Sink<'a, U>) -> bool {
@@ -469,10 +543,10 @@ impl<'a, U: Send> Outputs for Out<'a, U> {
     }
 
     unsafe fn commit(&mut self, batch: usize) {
-        // SAFETY: `prepare` reserved `item_len * batch`, `split` handed the first `item_len * batch`
-        // spare elements out as disjoint lane chunks covering that range exactly, and the caller
-        // guarantees every lane wrote its whole chunk (each `Sink` writes sequentially, so a full
-        // sink means every element was initialised) and is gone.
+        // SAFETY: `prepare` reserved `item_len * batch`; the lanes covered the first
+        // `item_len * batch` spare elements exactly, as disjoint ranges, and the caller guarantees
+        // every lane wrote its whole range (each `Sink` writes sequentially, so a full sink means
+        // every element was initialised) and is gone.
         unsafe { self.vec.set_len(self.item_len * batch) };
     }
 }
@@ -498,6 +572,7 @@ pub(crate) fn in_place<'a, U>(
 }
 
 impl<'a, U: Send> Outputs for InPlace<'a, U> {
+    type Parts = (SharedPtr<U>, usize, usize);
     type Lane = Chunk<'a, U>;
 
     fn prepare(&mut self, op: Op, batch: usize) -> Result<()> {
@@ -510,26 +585,26 @@ impl<'a, U: Send> Outputs for InPlace<'a, U> {
         Ok(())
     }
 
-    unsafe fn split(&mut self, batch: usize, chunk: usize) -> Vec<Chunk<'a, U>> {
-        let item_len = self.item_len;
-        let len = self.slice.len();
-        // SAFETY: the slice is exclusively borrowed for `'a` and `prepare` checked it holds
-        // `item_len * batch` elements; the caller keeps it untouched while the lanes live.
-        unsafe {
-            split_raw(
-                self.slice.as_mut_ptr(),
-                len,
-                chunk * item_len,
-                batch.div_ceil(chunk),
-            )
-        }
-        .enumerate()
-        .map(|(lane, slice)| Chunk {
+    unsafe fn parts(&mut self, _: usize) -> Self::Parts {
+        (
+            SharedPtr(self.slice.as_mut_ptr()),
+            self.slice.len(),
+            self.item_len,
+        )
+    }
+
+    unsafe fn lane(parts: &Self::Parts, _: usize, chunk: usize, lane: usize) -> Chunk<'a, U> {
+        let (ptr, len, item_len) = *parts;
+        let range = lane_range(len, chunk * item_len, lane);
+        // SAFETY: the slice is exclusively borrowed for `'a` and holds `len` elements, `range` lies
+        // inside it, it is not touched until the lanes are gone, and distinct lanes get disjoint
+        // ranges.
+        let slice = unsafe { core::slice::from_raw_parts_mut(ptr.0.add(range.start), range.len()) };
+        Chunk {
             slice,
             item_len,
             first: lane * chunk,
-        })
-        .collect()
+        }
     }
 
     fn lane_complete(_: &Chunk<'a, U>) -> bool {
@@ -541,15 +616,16 @@ impl<'a, U: Send> Outputs for InPlace<'a, U> {
 
 /// No outputs beyond what the item closure captures itself (a [`BatchedMut`] destination).
 impl Outputs for () {
+    type Parts = ();
     type Lane = ();
 
     fn prepare(&mut self, _: Op, _: usize) -> Result<()> {
         Ok(())
     }
 
-    unsafe fn split(&mut self, batch: usize, chunk: usize) -> Vec<()> {
-        vec![(); batch.div_ceil(chunk)]
-    }
+    unsafe fn parts(&mut self, _: usize) {}
+
+    unsafe fn lane(_: &(), _: usize, _: usize, _: usize) {}
 
     fn lane_complete(_: &()) -> bool {
         true
@@ -561,6 +637,7 @@ impl Outputs for () {
 macro_rules! impl_outputs_tuple {
     ($($name:ident $index:tt),+) => {
         impl<$($name: Outputs),+> Outputs for ($($name,)+) {
+            type Parts = ($($name::Parts,)+);
             type Lane = ($($name::Lane,)+);
 
             fn prepare(&mut self, op: Op, batch: usize) -> Result<()> {
@@ -568,13 +645,19 @@ macro_rules! impl_outputs_tuple {
                 Ok(())
             }
 
-            #[allow(non_snake_case)]
-            unsafe fn split(&mut self, batch: usize, chunk: usize) -> Vec<Self::Lane> {
+            unsafe fn parts(&mut self, batch: usize) -> Self::Parts {
                 // SAFETY: forwarded; the caller's guarantee covers every component.
-                $(let mut $name = unsafe { self.$index.split(batch, chunk) }.into_iter();)+
-                (0..batch.div_ceil(chunk))
-                    .map(|_| ($($name.next().expect("every output splits into the same lanes"),)+))
-                    .collect()
+                ($(unsafe { self.$index.parts(batch) },)+)
+            }
+
+            unsafe fn lane(
+                parts: &Self::Parts,
+                batch: usize,
+                chunk: usize,
+                lane: usize,
+            ) -> Self::Lane {
+                // SAFETY: forwarded; the caller's guarantee covers every component.
+                ($(unsafe { $name::lane(&parts.$index, batch, chunk, lane) },)+)
             }
 
             fn lane_complete(lane: &Self::Lane) -> bool {
@@ -629,11 +712,15 @@ where
     }
     let lanes = plan.lanes.clamp(1, batch);
     let chunk = batch.div_ceil(lanes);
+    let lanes = batch.div_ceil(chunk);
     let result = {
-        // SAFETY: `prepare` succeeded above, and every lane is consumed inside this block, before
-        // `outputs` is touched again by `commit`.
-        let lane_outputs = unsafe { outputs.split(batch, chunk) };
-        let run_lane = |lane: usize, mut out: O::Lane, item_par: Parallel<'_>| -> Result<()> {
+        // SAFETY: `prepare` succeeded above; every lane is created once from its own index and
+        // consumed inside this block, before `outputs` is touched again by `commit`.
+        let parts = unsafe { outputs.parts(batch) };
+        let parts = &parts;
+        let run_lane = |lane: usize, item_par: Parallel<'_>| -> Result<()> {
+            // SAFETY: each call site passes a distinct lane index.
+            let mut out = unsafe { O::lane(parts, batch, chunk, lane) };
             let start = lane * chunk;
             let end = (start + chunk).min(batch);
             with_parallel(item_par, |faer_par| {
@@ -651,38 +738,48 @@ where
                 }
             })
         };
-        if lane_outputs.len() == 1 {
-            let only = lane_outputs.into_iter().next().expect("one lane");
-            run_lane(0, only, plan.item_parallel)
+        if lanes == 1 {
+            run_lane(0, plan.item_parallel)
         } else {
             match par {
                 Parallel::Pool { pool, .. } => {
-                    let mut results: Vec<Result<()>> =
-                        (0..lane_outputs.len()).map(|_| Ok(())).collect();
-                    let run_lane = &run_lane;
+                    // The lowest failing lane's error; lanes never wait on or cancel each other.
+                    let failure: Mutex<Option<(usize, Error)>> = Mutex::new(None);
+                    let (run_lane, failure_ref) = (&run_lane, &failure);
                     pool.install(|| {
                         rayon::scope(|scope| {
-                            for ((lane, out), slot) in
-                                lane_outputs.into_iter().enumerate().zip(results.iter_mut())
-                            {
+                            for lane in 0..lanes {
                                 scope.spawn(move |_| {
-                                    *slot = run_lane(lane, out, Parallel::Sequential);
+                                    if let Err(error) = run_lane(lane, Parallel::Sequential) {
+                                        let mut slot = failure_ref
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        if slot.as_ref().is_none_or(|(first, _)| lane < *first) {
+                                            *slot = Some((lane, error));
+                                        }
+                                    }
                                 });
                             }
                         });
                     });
-                    results.into_iter().collect::<Result<()>>()
+                    match failure
+                        .into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    {
+                        Some((_, error)) => Err(error),
+                        None => Ok(()),
+                    }
                 }
-                Parallel::Sequential => lane_outputs
-                    .into_iter()
-                    .enumerate()
-                    .try_for_each(|(lane, out)| run_lane(lane, out, Parallel::Sequential)),
+                Parallel::Sequential => {
+                    (0..lanes).try_for_each(|lane| run_lane(lane, Parallel::Sequential))
+                }
             }
         }
     };
     if result.is_ok() {
-        // SAFETY: every lane returned `Ok`, a lane returns `Ok` only after `O::lane_complete`
-        // confirmed it filled its outputs, and every lane was moved into (and dropped by) its run.
+        // SAFETY: every lane `0..lanes` was created once and returned `Ok`, which it does only
+        // after `O::lane_complete` confirmed it filled its outputs; each lane view was dropped at
+        // the end of its run.
         unsafe { outputs.commit(batch) };
     }
     result
@@ -795,5 +892,17 @@ mod tests {
         assert_eq!(broadcast.len(), 2);
         assert_eq!(broadcast.offset(4), 4);
         assert_eq!(BatchAxes::new(&[3, 2], &[0, 0]).offset(5), 0);
+    }
+
+    #[test]
+    fn axes_stay_inline_up_to_eight_and_spill_beyond() {
+        let dims = [2usize; 10];
+        // Non-mergeable: every stride leaves a gap.
+        let strides: Vec<isize> = (0..10).map(|axis| 3isize.pow(axis)).collect();
+        let eight = BatchAxes::new(&dims[..8], &strides[..8]);
+        assert!(eight.is_inline() && eight.len() == 8);
+        let ten = BatchAxes::new(&dims, &strides);
+        assert!(!ten.is_inline() && ten.len() == 10);
+        assert_eq!(ten.offset(1023), strides.iter().sum::<isize>());
     }
 }

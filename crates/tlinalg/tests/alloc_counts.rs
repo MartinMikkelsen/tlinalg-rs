@@ -1,8 +1,9 @@
 //! Steady-state heap allocations per batched call, counted with a global allocator.
 //!
-//! The output vector is reused with enough capacity, as a host recycling pooled buffers would.
-//! What remains is the driver's per-call bookkeeping and the lane scratch, independent of the batch
-//! size. This test pins those counts for one lane so a regression shows up as a number.
+//! The output vectors are reused with enough capacity, as a host recycling pooled buffers would.
+//! The batch driver allocates nothing on one lane; what remains is each family's faer lane
+//! scratch, independent of the batch size. This test pins those counts for one lane so a
+//! regression shows up as a number.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -36,8 +37,79 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+/// Allocations made by the second of two identical calls (the first warms up).
+fn steady(mut call: impl FnMut()) -> usize {
+    call();
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    call();
+    ALLOCATIONS.load(Ordering::Relaxed) - before
+}
+
+/// `batch` compact, well-conditioned `n x n` matrices.
+fn batch_of(n: usize, batch: usize) -> Vec<f64> {
+    (0..n * n * batch)
+        .map(|i| {
+            let (row, col) = (i % n, (i / n) % n);
+            if row == col {
+                4.0 + row as f64
+            } else {
+                0.1
+            }
+        })
+        .collect()
+}
+
+/// Steady-state allocations per call of each family, one sequential lane, `n = 6`.
+fn family_counts(batch: usize) -> [(&'static str, usize); 7] {
+    let n = 6;
+    let a = batch_of(n, batch);
+    let (dims, strides) = ([n, n, batch], [1, n as isize, (n * n) as isize]);
+    let view = RawStridedRef::new(&a, &dims, &strides, 0).unwrap();
+    let (seq, plan) = (Parallel::Sequential, LanePlan::sequential());
+    let cap = n * n * batch;
+    let (mut v1, mut v2, mut v3) = (
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+    );
+    let cholesky = steady(|| {
+        tlinalg::cholesky::cholesky(Op::Cholesky, view, &mut v1, seq, plan).unwrap();
+    });
+    let qr = steady(|| tlinalg::qr::qr(Op::Qr, view, &mut v1, &mut v2, seq, plan).unwrap());
+    let eigh = steady(|| {
+        tlinalg::eigh::eigh(Op::Eigh, view, &mut v1, &mut v2, seq, plan).unwrap();
+    });
+    let svd = steady(|| {
+        tlinalg::svd::svd(Op::Svd, view, false, &mut v1, &mut v2, &mut v3, seq, plan).unwrap();
+    });
+    let (mut lu, mut piv, mut parity) = (a.clone(), vec![0; n * batch], vec![0.0; batch]);
+    let packed_lu = steady(|| {
+        lu.copy_from_slice(&a);
+        tlinalg::packed_lu::factor(
+            Op::LuFactor,
+            n,
+            n,
+            &mut lu,
+            &mut piv,
+            &mut parity,
+            seq,
+            plan,
+        )
+        .unwrap();
+    });
+    [
+        ("cholesky", cholesky),
+        ("qr", qr),
+        ("eigh", eigh),
+        ("svd", svd),
+        ("packed_lu factor", packed_lu),
+        ("triangular_solve left", triangular(true, batch)),
+        ("triangular_solve right", triangular(false, batch)),
+    ]
+}
+
 /// Allocations made by one triangular solve over `batch` systems on one sequential lane.
-fn allocations(left_side: bool, batch: usize) -> usize {
+fn triangular(left_side: bool, batch: usize) -> usize {
     let n = 6;
     let nrhs = 3;
     let a: Vec<f64> = (0..n * n)
@@ -59,35 +131,38 @@ fn allocations(left_side: bool, batch: usize) -> usize {
     let a_view = RawStridedRef::new(&a, &a_dims, &a_strides, 0).unwrap();
     let b_view = RawStridedRef::new(&b, &b_dims, &b_strides, 0).unwrap();
     let mut x = Vec::with_capacity(rows * cols * batch);
-    let call = |x: &mut Vec<f64>| {
+    steady(|| {
         triangular_solve(
             Op::TriangularSolve,
             a_view,
             b_view,
             flags,
-            x,
+            &mut x,
             Parallel::Sequential,
             LanePlan::sequential(),
         )
         .unwrap();
-    };
-    call(&mut x); // warm-up
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    call(&mut x);
-    ALLOCATIONS.load(Ordering::Relaxed) - before
+    })
 }
 
+/// The driver itself allocates nothing on one lane; what remains is each family's faer lane
+/// scratch, built once per call and independent of the batch size.
 #[test]
 fn per_call_allocations_do_not_grow_with_the_batch() {
-    let left = (allocations(true, 1), allocations(true, 64));
-    let right = (allocations(false, 1), allocations(false, 64));
-    // Driver bookkeeping, independent of the batch size: the normalised batch axes of `a` and `b`
-    // (one small vector each) and the per-lane lists of the output and of the output tuple.
-    assert_eq!(left, (4, 4), "left side: no per-item or scratch allocation");
-    // Plus the right side's lane work matrix.
-    assert_eq!(
-        right,
-        (5, 5),
-        "right side: one work matrix per lane per call"
-    );
+    let one = family_counts(1);
+    let many = family_counts(64);
+    for ((name, at_one), (_, at_many)) in one.iter().zip(&many) {
+        println!("{name}: {at_one} (batch 1), {at_many} (batch 64)");
+        assert_eq!(at_one, at_many, "{name}: allocations grow with the batch");
+    }
+    let expected = [
+        ("cholesky", 2),
+        ("qr", 5),
+        ("eigh", 3),
+        ("svd", 4),
+        ("packed_lu factor", 5),
+        ("triangular_solve left", 0),
+        ("triangular_solve right", 1),
+    ];
+    assert_eq!(one, expected);
 }
