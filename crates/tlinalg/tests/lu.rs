@@ -31,7 +31,7 @@ fn permutation_sign(p: &[Complex64], n: usize) -> f64 {
 
 fn lu_reconstructs<T: TestScalar + FaerScalar>() {
     for (m, n) in [(4, 4), (5, 3), (3, 5), (1, 1)] {
-        let a = matrix::<T>(m, n, 11);
+        let a = pivoting::<T>(m, n, 11);
         let (storage, strides, offset) = padded(&a, m, n);
         let dims = [m, n];
         let (mut p, mut l, mut u) = (Vec::new(), Vec::new(), Vec::new());
@@ -54,8 +54,14 @@ fn lu_reconstructs<T: TestScalar + FaerScalar>() {
         for i in 0..k {
             assert_eq!(l[i + i * m], Complex64::new(1.0, 0.0), "unit diagonal");
         }
-        let rebuilt = matmul(&matmul(&p, &l, m, m, k), &u, m, k, n);
-        assert_close(&rebuilt, &widen(&a), T::TOL, &format!("P L U {m}x{n}"));
+        // `P A = L U`.
+        let rebuilt = matmul(&p, &widen(&a), m, m, n);
+        assert_close(
+            &rebuilt,
+            &matmul(&l, &u, m, k, n),
+            T::TOL,
+            &format!("P A = L U {m}x{n}"),
+        );
         assert_eq!(parity.to_c64().re, permutation_sign(&p, m), "parity");
     }
 }
@@ -84,7 +90,7 @@ fn lu_of_a_singular_matrix_is_not_an_error() {
 fn solve_residual<T: TestScalar + FaerScalar>() {
     let n = 4;
     let nrhs = 2;
-    let a = matrix::<T>(n, n, 13);
+    let a = pivoting::<T>(n, n, 13);
     let b = matrix::<T>(n, nrhs, 17);
     for transpose_a in [false, true] {
         // Strided destination: leading dimension n + 2, offset 3.
@@ -170,7 +176,7 @@ for_each_scalar!(solve_singular, solve_singular_leaves_destination);
 
 fn full_piv_reconstructs<T: TestScalar + FaerScalar>() {
     for n in [1, 4] {
-        let a = matrix::<T>(n, n, 19);
+        let a = pivoting::<T>(n, n, 19);
         let (storage, strides, offset) = padded(&a, n, n);
         let dims = [n, n];
         let (mut p, mut l, mut u, mut q) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -188,8 +194,15 @@ fn full_piv_reconstructs<T: TestScalar + FaerScalar>() {
         )
         .unwrap();
         let (p, l, u, q) = (widen(&p), widen(&l), widen(&u), widen(&q));
-        let rebuilt = matmul(&matmul(&matmul(&p, &l, n, n, n), &u, n, n, n), &q, n, n, n);
-        assert_close(&rebuilt, &widen(&a), T::TOL, "P L U Q");
+        // `P A Qᵀ = L U`.
+        let rebuilt = matmul(
+            &matmul(&p, &widen(&a), n, n, n),
+            &transpose(&q, n, n),
+            n,
+            n,
+            n,
+        );
+        assert_close(&rebuilt, &matmul(&l, &u, n, n, n), T::TOL, "P A Qᵀ = L U");
         let sign = permutation_sign(&p, n) * permutation_sign(&q, n);
         assert_eq!(parity.to_c64().re, sign, "parity");
     }
@@ -199,7 +212,7 @@ for_each_scalar!(full_piv_reconstruction, full_piv_reconstructs);
 fn full_piv_solves<T: TestScalar + FaerScalar>() {
     let n = 4;
     let nrhs = 3;
-    let a = matrix::<T>(n, n, 23);
+    let a = pivoting::<T>(n, n, 23);
     let b = matrix::<T>(n, nrhs, 29);
     for transpose_a in [false, true] {
         let mut x = b.clone();

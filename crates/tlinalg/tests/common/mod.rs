@@ -12,7 +12,7 @@ pub mod single;
 pub use tlinalg_testkit::TestScalar as SharedTestScalar;
 pub use tlinalg_testkit::{
     adjoint, assert_close, batch_buf, broadcast_buf, for_each_scalar, hermitian, hpd, identity,
-    matmul, matrix, narrow, padded, transpose, widen, BatchBuf, Layout,
+    is_symmetric, matmul, matrix, narrow, padded, pivoting, transpose, widen, BatchBuf, Layout,
 };
 
 /// A scalar the faer tests instantiate a kernel for: the shared test scalar, as a `tlinalg` scalar.

@@ -114,6 +114,38 @@ pub fn matrix<T: TestScalar>(m: usize, n: usize, seed: usize) -> Vec<T> {
         .collect()
 }
 
+/// A deterministic column-major `m x n` matrix whose partial and full pivoting both produce
+/// **non-symmetric** permutations.
+///
+/// Small entries from [`matrix`] (scaled by `0.05`) plus one dominant entry per leading index `i`,
+/// at row `(i + 1) mod m` and column `i`, with well-separated magnitudes in a scrambled
+/// order. A diagonally dominant matrix pivots trivially (identity or a single swap, both
+/// symmetric), which cannot tell `P A = L U` from `A = P L U`; this one can.
+pub fn pivoting<T: TestScalar>(m: usize, n: usize, seed: usize) -> Vec<T> {
+    const MAGNITUDES: [f64; 5] = [30.0, 10.0, 50.0, 20.0, 40.0];
+    let mut a = widen(&matrix::<T>(m, n, seed));
+    for value in &mut a {
+        *value *= 0.05;
+    }
+    if m > 0 && n > 0 {
+        for i in 0..m.min(n) {
+            let magnitude = MAGNITUDES[i % 5] * (1 + i / 5) as f64;
+            let phase = if T::COMPLEX {
+                Complex64::new(0.8, 0.6)
+            } else {
+                Complex64::new(1.0, 0.0)
+            };
+            a[(i + 1) % m + i * m] = phase * magnitude;
+        }
+    }
+    narrow(&a)
+}
+
+/// Whether a column-major `n x n` matrix equals its transpose.
+pub fn is_symmetric(a: &[Complex64], n: usize) -> bool {
+    (0..n).all(|col| (0..n).all(|row| a[row + col * n] == a[col + row * n]))
+}
+
 /// `count` compact `rows x cols` matrices with consecutive seeds starting at `seed`, back to back.
 pub fn batch_of<T: TestScalar>(rows: usize, cols: usize, count: usize, seed: usize) -> Vec<T> {
     (0..count)

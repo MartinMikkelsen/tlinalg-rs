@@ -20,7 +20,7 @@ use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
 /// Each vector is cleared and then filled with compact column-major items in batch order.
 #[derive(Debug)]
 pub struct LuFactors<'a, T> {
-    /// The `m x m` row permutation `P` per item, with `A = P L U`.
+    /// The `m x m` row permutation `P` per item, with `P A = L U` (equivalently `A = Pᵀ L U`).
     pub p: &'a mut Vec<T>,
     /// The unit-lower-trapezoidal `m x min(m, n)` factor `L` per item.
     pub l: &'a mut Vec<T>,
@@ -104,7 +104,7 @@ fn lu_item<T: FaerScalar>(
     parity.push(T::parity(transpositions % 2 != 0));
 }
 
-/// Partial-pivot LU of every `m x n` matrix of a batch, `A = P L U`.
+/// Partial-pivot LU of every `m x n` matrix of a batch, `P A = L U`.
 ///
 /// `input` is `[m, n, b...]`. An exactly singular input is not an error.
 ///

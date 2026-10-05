@@ -20,7 +20,7 @@ use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
 /// Each vector is cleared and then filled with compact column-major items in batch order.
 #[derive(Debug)]
 pub struct FullPivLuFactors<'a, T> {
-    /// The `n x n` row permutation `P` per item, with `A = P L U Q`.
+    /// The `n x n` row permutation `P` per item, with `P A Qᵀ = L U` (equivalently `A = Pᵀ L U Q`).
     pub p: &'a mut Vec<T>,
     /// The unit-lower-triangular factor `L` per item.
     pub l: &'a mut Vec<T>,
@@ -111,7 +111,7 @@ fn full_piv_lu_item<T: FaerScalar>(
     parity.push(T::parity(transpositions % 2 != 0));
 }
 
-/// Full-pivot LU of every `n x n` matrix of a batch, `A = P L U Q`.
+/// Full-pivot LU of every `n x n` matrix of a batch, `P A Qᵀ = L U`.
 ///
 /// `input` is `[n, n, b...]`.
 ///
