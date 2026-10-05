@@ -1,26 +1,25 @@
-//! faer-backed triangular solve.
+//! faer-backed batched triangular solve.
 //!
-//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0). The entry point is
-//! per matrix; the host keeps its batch iteration.
+//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0).
 //!
 //! # Boundary
 //!
-//! The right-hand side is an **owned** column-major buffer the solve consumes, because every
-//! triangular solve overwrites its right-hand side: the caller decides once where those elements
-//! come from (a compact tensor, or a borrowed view gathered straight into a pooled buffer). The
-//! result is returned as a buffer too:
+//! The coefficient batch `a` is `[n, n, b...]` and the right-hand-side batch `b` is
+//! `[b_rows, b_cols, b...]`, both borrowed strided descriptors. The solution `x` is cleared and
+//! filled with compact column-major items in batch order:
 //!
-//! * a left-side solve `A X = B` overwrites `rhs` in place and returns it;
-//! * a right-side solve `X A = B` is the left-side solve of the transposed system, so the
-//!   right-hand side is transposed into a buffer from the [`Workspace`], solved, and transposed
-//!   back into a second one. The two consumed buffers are [`Workspace::release`]d, exactly as the
-//!   pre-extraction code returned them to the host pool.
+//! * a left-side solve `A X = B` copies `B` into the item's output chunk and solves it in place;
+//! * a right-side solve `X A = B` is the left-side solve of the transposed system, so `B` is
+//!   transposed into a lane-local buffer, solved, and transposed out into the output chunk. The
+//!   buffer is lane scratch, reused for every item of the lane (the pre-extraction host borrowed
+//!   two pooled buffers per item for this).
 
-use faer::{MatMut, MatRef};
+use faer::{Mat, MatMut, MatRef};
 use strided_view::RawStridedRef;
 
-use crate::util::{invalid, mat_ref};
-use crate::{with_parallel, FaerScalar, Op, Parallel, Result, Workspace};
+use crate::batch::{self, out, same_batch, BatchedRef, Push};
+use crate::util::invalid;
+use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
 
 /// Which triangle and which variant of the coefficient matrix a triangular solve uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,86 +64,15 @@ fn solve_in_place<E: faer::traits::ComplexField>(
     }
 }
 
-/// Transpose a column-major `rows x cols` buffer into a capacity buffer from the workspace.
-fn transpose_into<T: FaerScalar, W: Workspace<T> + ?Sized>(
-    workspace: &mut W,
-    data: &[T],
-    rows: usize,
-    cols: usize,
-) -> Vec<T> {
-    let mut transposed = workspace.acquire_capacity(data.len());
-    for j in 0..rows {
-        for i in 0..cols {
-            transposed.push(data[j + i * rows]);
-        }
-    }
-    transposed
-}
-
-/// Solve one triangular system with an `n x n` coefficient matrix.
-///
-/// `rhs` is the column-major `b_rows x b_cols` right-hand side and is consumed. The returned buffer
-/// is the column-major solution: `n x b_cols` for a left-side solve, `b_rows x n` for a right-side
-/// one.
-///
-/// # Errors
-///
-/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when `a` does not describe `n x n`, when
-/// `rhs` does not hold `b_rows * b_cols` elements, or when the right-hand side's solved dimension is
-/// not `n` (`b_rows` for a left-side solve, `b_cols` for a right-side one). A host that reports a
-/// shape mismatch for that case checks it before calling. On error `rhs` is dropped, not released.
-///
-/// # Examples
-///
-/// ```
-/// use strided_view::RawStridedRef;
-/// use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
-/// use tlinalg::{Op, Parallel, Workspace};
-///
-/// struct Heap;
-/// impl Workspace<f64> for Heap {
-///     fn acquire_zeroed(&mut self, len: usize) -> Vec<f64> { vec![0.0; len] }
-///     fn acquire_capacity(&mut self, cap: usize) -> Vec<f64> { Vec::with_capacity(cap) }
-///     fn acquire_uninit(&mut self, len: usize) -> Vec<core::mem::MaybeUninit<f64>> {
-///         (0..len).map(|_| core::mem::MaybeUninit::uninit()).collect()
-///     }
-///     fn release(&mut self, _buf: Vec<f64>) {}
-/// }
-///
-/// // Lower-triangular A = [[2, 0], [1, 1]], B = [2, 3].
-/// let a = [2.0_f64, 1.0, 0.0, 1.0];
-/// let flags = TriangularSolveFlags { left_side: true, lower: true, transpose_a: false, unit_diagonal: false };
-/// let x = triangular_solve(
-///     Op::TriangularSolve, 2, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
-///     vec![2.0, 3.0], 2, 1, flags, &mut Heap, Parallel::Sequential,
-/// ).unwrap();
-/// assert_eq!(x, [1.0, 2.0]);
-/// ```
-// INVARIANT: the argument list mirrors the host core it replaces — coefficient descriptor, owned
-// right-hand side with its shape, flags, scratch source and token are distinct operands.
-#[allow(clippy::too_many_arguments)]
-pub fn triangular_solve<T: FaerScalar, W: Workspace<T> + ?Sized>(
-    op: Op,
-    n: usize,
-    a: RawStridedRef<'_, T>,
-    mut rhs: Vec<T>,
-    b_rows: usize,
-    b_cols: usize,
+/// Solve one system. `work` is a compact `n x nrhs` lane buffer.
+fn triangular_solve_item<T: FaerScalar>(
+    a: MatRef<'_, T::Entity>,
+    b: MatRef<'_, T::Entity>,
     flags: TriangularSolveFlags,
-    workspace: &mut W,
-    par: Parallel<'_>,
-) -> Result<Vec<T>> {
-    let a_mat = mat_ref(op, "A", &a, n, n)?;
-    if b_rows.checked_mul(b_cols) != Some(rhs.len()) {
-        return Err(invalid(
-            op,
-            "configuration",
-            format!(
-                "right-hand side holds {} elements, expected {b_rows}x{b_cols}",
-                rhs.len()
-            ),
-        ));
-    }
+    x: &mut impl Push<T>,
+    work: &mut Mat<T::Entity>,
+    par: faer::Par,
+) {
     let TriangularSolveFlags {
         left_side,
         lower,
@@ -152,6 +80,76 @@ pub fn triangular_solve<T: FaerScalar, W: Workspace<T> + ?Sized>(
         unit_diagonal,
     } = flags;
     if left_side {
+        // `work` is `n x b_cols`: B, solved in place, pushed column-major.
+        work.copy_from(b);
+        solve_in_place(a, work.as_mut(), lower, transpose_a, unit_diagonal, par);
+    } else {
+        // Right-side solve `X A = B` is the left-side solve of the transposed system, so the RHS is
+        // transposed in and out and the triangle/transpose flags flip once. `work` is
+        // `n x b_rows` = `Bᵀ`.
+        work.copy_from(b.transpose());
+        solve_in_place(a, work.as_mut(), lower, !transpose_a, unit_diagonal, par);
+    }
+    let work = if left_side {
+        work.as_ref()
+    } else {
+        work.as_ref().transpose()
+    };
+    for col in 0..work.ncols() {
+        for row in 0..work.nrows() {
+            x.push(T::from_entity(work[(row, col)]));
+        }
+    }
+}
+
+/// Solve every triangular system of a batch.
+///
+/// `a` is `[n, n, b...]` and `b` is `[b_rows, b_cols, b...]` with the same batch shape. `x`
+/// receives the column-major solution per item: `n x b_cols` for a left-side solve, `b_rows x n`
+/// for a right-side one.
+///
+/// # Errors
+///
+/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when `a` is not a batch of square
+/// matrices, the batch shapes differ, or the right-hand side's solved dimension is not `n`
+/// (`b_rows` for a left-side solve, `b_cols` for a right-side one). A host that reports a shape
+/// mismatch for that case checks it before calling. `x` is empty on error.
+///
+/// # Examples
+///
+/// ```
+/// use strided_view::RawStridedRef;
+/// use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
+/// use tlinalg::{LanePlan, Op, Parallel};
+///
+/// // Lower-triangular A = [[2, 0], [1, 1]], B = [2, 3].
+/// let a = [2.0_f64, 1.0, 0.0, 1.0];
+/// let b = [2.0_f64, 3.0];
+/// let flags = TriangularSolveFlags { left_side: true, lower: true, transpose_a: false, unit_diagonal: false };
+/// let mut x = Vec::new();
+/// triangular_solve(
+///     Op::TriangularSolve,
+///     RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
+///     RawStridedRef::new(&b, &[2, 1], &[1, 2], 0).unwrap(),
+///     flags, &mut x, Parallel::Sequential, LanePlan::sequential(),
+/// ).unwrap();
+/// assert_eq!(x, [1.0, 2.0]);
+/// ```
+pub fn triangular_solve<T: FaerScalar>(
+    op: Op,
+    a: RawStridedRef<'_, T>,
+    b: RawStridedRef<'_, T>,
+    flags: TriangularSolveFlags,
+    x: &mut Vec<T>,
+    par: Parallel<'_>,
+    plan: LanePlan<'_>,
+) -> Result<()> {
+    let a = BatchedRef::square(op, "A", a)?;
+    let b = BatchedRef::new(op, "B", b)?;
+    same_batch(op, "B", a.batch_dims(), b.batch_dims())?;
+    let n = a.rows();
+    let (b_rows, b_cols) = (b.rows(), b.cols());
+    let nrhs = if flags.left_side {
         if b_rows != n {
             return Err(invalid(
                 op,
@@ -159,11 +157,7 @@ pub fn triangular_solve<T: FaerScalar, W: Workspace<T> + ?Sized>(
                 format!("right-hand side has {b_rows} rows, expected {n}"),
             ));
         }
-        let matrix = MatMut::from_column_major_slice_mut(T::entity_slice_mut(&mut rhs), n, b_cols);
-        with_parallel(par, |par| {
-            solve_in_place(a_mat, matrix, lower, transpose_a, unit_diagonal, par)
-        });
-        Ok(rhs)
+        b_cols
     } else {
         if b_cols != n {
             return Err(invalid(
@@ -172,18 +166,19 @@ pub fn triangular_solve<T: FaerScalar, W: Workspace<T> + ?Sized>(
                 format!("right-hand side has {b_cols} columns, expected {n}"),
             ));
         }
-        // Right-side solve `X A = B` is the left-side solve of the transposed system, so the RHS is
-        // transposed in and out and the triangle/transpose flags flip once.
-        let nrhs = b_rows;
-        let mut transposed = transpose_into(workspace, &rhs, nrhs, n);
-        workspace.release(rhs);
-        let matrix =
-            MatMut::from_column_major_slice_mut(T::entity_slice_mut(&mut transposed), n, nrhs);
-        with_parallel(par, |par| {
-            solve_in_place(a_mat, matrix, lower, !transpose_a, unit_diagonal, par)
-        });
-        let result = transpose_into(workspace, &transposed, n, nrhs);
-        workspace.release(transposed);
-        Ok(result)
-    }
+        b_rows
+    };
+    let item_len = crate::util::checked_product(op, "X", &[b_rows, b_cols])?;
+    batch::run(
+        op,
+        a.batch(),
+        par,
+        plan,
+        &mut (out(x, item_len),),
+        |_| Mat::<T::Entity>::zeros(n, nrhs),
+        |index, (x,), work, par| {
+            triangular_solve_item::<T>(a.item(index), b.item(index), flags, x, work, par);
+            Ok(())
+        },
+    )
 }

@@ -1,12 +1,13 @@
 //! Behavioural tests for the ported triangular solve: every flag combination on both sides
-//! checked by residual, transposed coefficient layout, workspace traffic, and shape errors.
+//! checked by residual, transposed coefficient layout, and shape errors.
 
 mod common;
 
+use common::single::triangular_solve;
 use common::*;
 use num_complex::Complex64;
 use strided_view::RawStridedRef;
-use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
+use tlinalg::triangular_solve::TriangularSolveFlags;
 use tlinalg::FaerScalar;
 use tlinalg::{Error, Op, Parallel};
 
@@ -53,7 +54,7 @@ fn all_flags<T: TestScalar + FaerScalar>() {
             (nrhs, n)
         };
         let b = matrix::<T>(b_rows, b_cols, 5);
-        let mut workspace = CountingWorkspace::default();
+        let mut workspace = CountingWorkspace;
         let x = triangular_solve(
             Op::TriangularSolve,
             n,
@@ -74,13 +75,6 @@ fn all_flags<T: TestScalar + FaerScalar>() {
             matmul(&x, &op_a, nrhs, n, n)
         };
         assert_close(&rebuilt, &widen(&b), T::TOL, &format!("{flags:?}"));
-        // The right-side route borrows two transposition buffers and returns the two it consumed.
-        let expected = if flags.left_side { (0, 0) } else { (2, 2) };
-        assert_eq!(
-            (workspace.acquired, workspace.released),
-            expected,
-            "{flags:?}"
-        );
     }
 }
 for_each_scalar!(flag_combinations, all_flags);
@@ -106,7 +100,7 @@ fn transposed_layout<T: TestScalar + FaerScalar>() {
             n,
             2,
             flags,
-            &mut CountingWorkspace::default(),
+            &mut CountingWorkspace,
             Parallel::Sequential,
         )
         .unwrap()
@@ -135,7 +129,7 @@ fn shape_errors() {
             rows,
             cols,
             flags,
-            &mut CountingWorkspace::default(),
+            &mut CountingWorkspace,
             Parallel::Sequential,
         )
     };

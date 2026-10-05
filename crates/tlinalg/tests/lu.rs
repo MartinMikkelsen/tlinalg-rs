@@ -2,11 +2,10 @@
 
 mod common;
 
+use common::single::{full_piv_lu, full_piv_lu_solve, lu, solve, FullPivLuFactors, LuFactors};
 use common::*;
 use num_complex::Complex64;
 use strided_view::{RawStridedMut, RawStridedRef};
-use tlinalg::full_piv_lu::{full_piv_lu, full_piv_lu_solve, FullPivLuFactors};
-use tlinalg::lu::{lu, solve, LuFactors};
 use tlinalg::FaerScalar;
 use tlinalg::{Error, Op, Parallel};
 

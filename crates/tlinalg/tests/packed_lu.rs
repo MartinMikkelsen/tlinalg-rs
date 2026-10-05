@@ -6,8 +6,76 @@
 //! the singular rule, and the chunk contract.
 
 use num_complex::{Complex32, Complex64};
-use tlinalg::packed_lu::{factor_chunk, factor_solve_chunk, solve_prepared_chunk, FactorScratch};
-use tlinalg::{Error, Op, Parallel};
+use strided_view::RawStridedRef;
+use tlinalg::packed_lu::{factor, factor_solve, solve_prepared};
+use tlinalg::{Error, FaerScalar, LanePlan, Op, Parallel};
+
+// Shims with the pre-batching argument order, so the format tests below read as before: each runs
+// the batched entry point on one lane over a compact batch.
+
+fn factor_chunk<T: FaerScalar>(
+    op: Op,
+    m: usize,
+    n: usize,
+    lu: &mut [T],
+    pivots: &mut [i32],
+    parity: &mut [T],
+    par: Parallel<'_>,
+) -> tlinalg::Result<()> {
+    factor(op, m, n, lu, pivots, parity, par, LanePlan::single(par))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_prepared_chunk<T: FaerScalar>(
+    op: Op,
+    n: usize,
+    nrhs: usize,
+    packed_lu: &[T],
+    pivots: &[i32],
+    output: &mut [T],
+    transpose_a: bool,
+    conjugate_a: bool,
+    par: Parallel<'_>,
+) -> tlinalg::Result<()> {
+    let batch = if n == 0 { 0 } else { packed_lu.len() / (n * n) };
+    let lu_dims = [n, n, batch];
+    let lu_strides = [1, n as isize, (n * n) as isize];
+    let piv_dims = [n, batch];
+    let piv_strides = [1, n as isize];
+    solve_prepared(
+        op,
+        RawStridedRef::new(packed_lu, &lu_dims, &lu_strides, 0).unwrap(),
+        RawStridedRef::new(pivots, &piv_dims, &piv_strides, 0).unwrap(),
+        nrhs,
+        output,
+        transpose_a,
+        conjugate_a,
+        par,
+        LanePlan::single(par),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn factor_solve_chunk<T: FaerScalar>(
+    op: Op,
+    n: usize,
+    nrhs: usize,
+    packed_lu: &mut [T],
+    pivots: &mut [i32],
+    output: &mut [T],
+    par: Parallel<'_>,
+) -> tlinalg::Result<()> {
+    factor_solve(
+        op,
+        n,
+        nrhs,
+        packed_lu,
+        pivots,
+        output,
+        par,
+        LanePlan::single(par),
+    )
+}
 
 /// Compact column-major `n x n` matrix chosen so partial pivoting actually swaps: the leading entry
 /// is zero, but the rest of the first column is not, so the matrix stays nonsingular.
@@ -130,7 +198,6 @@ fn factor_one(a: &[f64], n: usize) -> (Vec<f64>, Vec<i32>, f64) {
     let mut packed = a.to_vec();
     let mut pivots = vec![0i32; n];
     let mut parity = vec![0.0f64; 1];
-    let mut scratch = FactorScratch::<f64>::new(n, n, Parallel::Sequential);
     factor_chunk(
         Op::LuFactor,
         n,
@@ -139,7 +206,6 @@ fn factor_one(a: &[f64], n: usize) -> (Vec<f64>, Vec<i32>, f64) {
         &mut pivots,
         &mut parity,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
     (packed, pivots, parity[0])
@@ -175,7 +241,6 @@ fn factor_chunk_rejects_buffers_that_describe_different_batches() {
     let mut lu = vec![0.0f64; 4];
     let mut pivots = vec![0i32; 1];
     let mut parity = vec![0.0f64; 2];
-    let mut scratch = FactorScratch::<f64>::new(2, 2, Parallel::Sequential);
     let error = factor_chunk(
         Op::LuFactor,
         2,
@@ -184,7 +249,6 @@ fn factor_chunk_rejects_buffers_that_describe_different_batches() {
         &mut pivots,
         &mut parity,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap_err();
     assert!(matches!(
@@ -197,40 +261,8 @@ fn factor_chunk_rejects_buffers_that_describe_different_batches() {
 }
 
 #[test]
-fn factor_chunk_rejects_a_scratch_of_the_wrong_shape() {
-    let n = 3;
-    let a = matrix(n);
-    let mut packed = a.clone();
-    let mut pivots = vec![0i32; n];
-    let mut parity = vec![0.0f64; 1];
-    // Sized for a different shape: the call must be refused before any buffer is touched.
-    let mut scratch = FactorScratch::<f64>::new(2, 2, Parallel::Sequential);
-    let error = factor_chunk(
-        Op::LuFactor,
-        n,
-        n,
-        &mut packed,
-        &mut pivots,
-        &mut parity,
-        Parallel::Sequential,
-        &mut scratch,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidArgument {
-            op: Op::LuFactor,
-            role: "configuration",
-            ..
-        }
-    ));
-    assert_eq!(packed, a, "a rejected call must not touch the buffers");
-}
-
-#[test]
 fn empty_batches_and_empty_rhs_are_accepted() {
     let n = 2;
-    let mut scratch = FactorScratch::<f64>::new(n, n, Parallel::Sequential);
     // No matrices at all.
     let mut no_matrices: Vec<f64> = Vec::new();
     let mut pivots: Vec<i32> = Vec::new();
@@ -243,7 +275,6 @@ fn empty_batches_and_empty_rhs_are_accepted() {
         &mut pivots,
         &mut parity,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 
@@ -260,7 +291,6 @@ fn empty_batches_and_empty_rhs_are_accepted() {
         &mut pivots,
         &mut no_rhs,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 }
@@ -367,7 +397,6 @@ fn factor_solve_matches_factor_then_solve() {
     let mut fused = a.clone();
     let mut pivots = vec![0i32; n];
     let mut solved = b.clone();
-    let mut scratch = FactorScratch::<f64>::new(n, n, Parallel::Sequential);
     factor_solve_chunk(
         Op::LuFactorSolve,
         n,
@@ -376,7 +405,6 @@ fn factor_solve_matches_factor_then_solve() {
         &mut pivots,
         &mut solved,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 
@@ -397,7 +425,6 @@ fn factor_solve_reports_singular_only_when_a_rhs_is_present() {
     let mut packed = a;
     let mut pivots = vec![0i32; n];
     let mut no_rhs: Vec<f64> = Vec::new();
-    let mut scratch = FactorScratch::<f64>::new(n, n, Parallel::Sequential);
     factor_solve_chunk(
         Op::LuFactorSolve,
         n,
@@ -406,7 +433,6 @@ fn factor_solve_reports_singular_only_when_a_rhs_is_present() {
         &mut pivots,
         &mut no_rhs,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 
@@ -421,7 +447,6 @@ fn factor_solve_reports_singular_only_when_a_rhs_is_present() {
         &mut pivots,
         &mut rhs,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap_err();
     assert!(matches!(
@@ -441,7 +466,6 @@ fn an_uneven_chunk_partition_matches_the_same_matrices_taken_alone() {
     let mut batched = matrices.concat();
     let mut pivots = vec![0i32; 5 * n];
     let mut parity = [0.0f64; 5];
-    let mut scratch = FactorScratch::<f64>::new(n, n, Parallel::Sequential);
     let chunk_len = 2;
     for (index, chunk) in batched.chunks_mut(chunk_len * n * n).enumerate() {
         let offset = index * chunk_len;
@@ -455,7 +479,6 @@ fn an_uneven_chunk_partition_matches_the_same_matrices_taken_alone() {
             &mut pivots[offset * n..(offset + count) * n],
             &mut parity[offset..offset + count],
             Parallel::Sequential,
-            &mut scratch,
         )
         .unwrap();
     }
@@ -507,7 +530,6 @@ fn real_and_complex_scalars_factor_and_solve() {
     let mut packed = a32.clone();
     let mut pivots = vec![0i32; n];
     let mut parity = vec![0.0f32; 1];
-    let mut scratch = FactorScratch::<f32>::new(n, n, Parallel::Sequential);
     factor_chunk(
         Op::LuFactor,
         n,
@@ -516,7 +538,6 @@ fn real_and_complex_scalars_factor_and_solve() {
         &mut pivots,
         &mut parity,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 
@@ -532,7 +553,6 @@ fn real_and_complex_scalars_factor_and_solve() {
     let mut packed_c = a.clone();
     let mut pivots_c = vec![0i32; n];
     let mut parity_c = vec![Complex64::new(0.0, 0.0); 1];
-    let mut scratch_c = FactorScratch::<Complex64>::new(n, n, Parallel::Sequential);
     factor_chunk(
         Op::LuFactor,
         n,
@@ -541,7 +561,6 @@ fn real_and_complex_scalars_factor_and_solve() {
         &mut pivots_c,
         &mut parity_c,
         Parallel::Sequential,
-        &mut scratch_c,
     )
     .unwrap();
 
@@ -585,7 +604,6 @@ fn real_and_complex_scalars_factor_and_solve() {
     let mut packed = a32c.clone();
     let mut pivots = vec![0i32; n];
     let mut parity = vec![Complex32::new(0.0, 0.0); 1];
-    let mut scratch = FactorScratch::<Complex32>::new(n, n, Parallel::Sequential);
     factor_chunk(
         Op::LuFactor,
         n,
@@ -594,7 +612,6 @@ fn real_and_complex_scalars_factor_and_solve() {
         &mut pivots,
         &mut parity,
         Parallel::Sequential,
-        &mut scratch,
     )
     .unwrap();
 }

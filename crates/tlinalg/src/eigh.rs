@@ -1,7 +1,6 @@
-//! faer-backed Hermitian (self-adjoint) eigendecomposition.
+//! faer-backed batched Hermitian (self-adjoint) eigendecomposition.
 //!
-//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0). The entry points
-//! are per matrix; the host keeps its batch iteration.
+//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0).
 //!
 //! The decomposition reads the **lower** triangle and returns non-decreasing eigenvalues. As with
 //! [`crate::svd`], [`eigh`] carries the (real) eigenvalues **in the scalar type itself** — complex
@@ -10,132 +9,177 @@
 //! values-only path.
 
 use faer::diag::Diag;
-use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::evd::ComputeEigenvectors;
-use faer::Mat;
+use faer::{Mat, MatRef};
 use strided_view::RawStridedRef;
 
+use crate::batch::{self, out, BatchedRef};
 use crate::scalar::ScalarEntity;
-use crate::util::{checked_product, mat_ref, push_mat};
-use crate::{faer_par, with_parallel, Error, FaerScalar, Op, Parallel, Result};
+use crate::util::{checked_product, push_mat};
+use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
 
-/// Eigenvalues of one `n x n` Hermitian matrix, without the vectors.
+/// Lane scratch for `n x n` Hermitian eigendecompositions.
+struct EighScratch<E: faer::traits::ComplexField> {
+    values: Diag<E>,
+    vectors: Mat<E>,
+    mem: MemBuffer,
+}
+
+impl<E: faer::traits::ComplexField> EighScratch<E> {
+    fn new(n: usize, vectors: ComputeEigenvectors, par: faer::Par) -> Self {
+        // faer's eigensolvers do not accept an empty matrix; an empty item is never decomposed.
+        let req = if n == 0 {
+            StackReq::EMPTY
+        } else {
+            faer::linalg::evd::self_adjoint_evd_scratch::<E>(n, vectors, par, Default::default())
+        };
+        let vector_cols = match vectors {
+            ComputeEigenvectors::Yes => n,
+            ComputeEigenvectors::No => 0,
+        };
+        Self {
+            values: Diag::zeros(n),
+            vectors: Mat::zeros(n, vector_cols),
+            mem: MemBuffer::new(req),
+        }
+    }
+}
+
+/// Decompose one matrix into the lane scratch.
+fn decompose<E: faer::traits::ComplexField>(
+    op: Op,
+    mat: MatRef<'_, E>,
+    with_vectors: bool,
+    scratch: &mut EighScratch<E>,
+    par: faer::Par,
+) -> Result<()> {
+    scratch.values.as_mut().fill(E::zero_impl());
+    let vectors = if with_vectors {
+        scratch.vectors.as_mut().fill(E::zero_impl());
+        Some(scratch.vectors.as_mut())
+    } else {
+        None
+    };
+    faer::linalg::evd::self_adjoint_evd(
+        mat,
+        scratch.values.as_mut(),
+        vectors,
+        par,
+        MemStack::new(&mut scratch.mem),
+        Default::default(),
+    )
+    .map_err(|_| Error::NonConvergence { op })
+}
+
+/// Eigenvalues of every `n x n` Hermitian matrix of a batch, without the vectors.
 ///
-/// `values` is cleared and filled with `n` non-decreasing real eigenvalues.
+/// `input` is `[n, n, b...]`; `values` receives `n` non-decreasing real eigenvalues per item.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`] when the descriptor does not describe `n x n`, and
-/// [`Error::NonConvergence`] when faer fails to converge.
+/// [`Error::InvalidArgument`] when `input` is not a batch of square matrices, and
+/// [`Error::NonConvergence`] for the lowest-indexed item faer fails to converge on. `values` is
+/// empty on error.
 ///
 /// # Examples
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{eigh::eigh_values, Op, Parallel};
+/// use tlinalg::{eigh::eigh_values, LanePlan, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 1.0];
 /// let mut w = Vec::new();
-/// eigh_values(Op::EighValues, 2, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w, Parallel::Sequential).unwrap();
+/// eigh_values(
+///     Op::EighValues, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w,
+///     Parallel::Sequential, LanePlan::sequential(),
+/// ).unwrap();
 /// assert_eq!(w, [1.0, 2.0]);
 /// ```
 pub fn eigh_values<T: FaerScalar>(
     op: Op,
-    n: usize,
     input: RawStridedRef<'_, T>,
     values: &mut Vec<<T as ScalarEntity>::Real>,
     par: Parallel<'_>,
+    plan: LanePlan<'_>,
 ) -> Result<()> {
-    let mat = mat_ref(op, "input", &input, n, n)?;
-    values.clear();
-    // faer's eigensolvers do not accept an empty matrix; there is nothing to decompose.
-    if n == 0 {
-        return Ok(());
-    }
-    let mut diag = Diag::<T::Entity>::zeros(n);
-    let mut mem = MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<T::Entity>(
-        n,
-        ComputeEigenvectors::No,
-        faer_par(par),
-        Default::default(),
-    ));
-    with_parallel(par, |par| {
-        faer::linalg::evd::self_adjoint_evd(
-            mat,
-            diag.as_mut(),
-            None,
-            par,
-            MemStack::new(&mut mem),
-            Default::default(),
-        )
-        .map_err(|_| Error::NonConvergence { op })
-    })?;
-    for index in 0..n {
-        values.push(T::real_from_entity(diag[index]));
-    }
-    Ok(())
+    let input = BatchedRef::square(op, "input", input)?;
+    let n = input.rows();
+    batch::run(
+        op,
+        input.batch(),
+        par,
+        plan,
+        &mut (out(values, n),),
+        |par| EighScratch::<T::Entity>::new(n, ComputeEigenvectors::No, par),
+        |index, (values,), scratch, par| {
+            if n == 0 {
+                return Ok(());
+            }
+            decompose(op, input.item(index), false, scratch, par)?;
+            for i in 0..n {
+                values.push(T::real_from_entity(scratch.values[i]));
+            }
+            Ok(())
+        },
+    )
 }
 
-/// Eigendecomposition of one `n x n` Hermitian matrix, `A = V diag(w) Vᴴ`.
+/// Eigendecomposition of every `n x n` Hermitian matrix of a batch, `A = V diag(w) Vᴴ`.
 ///
-/// `values` is cleared and filled with the `n` non-decreasing eigenvalues in the scalar type (zero
-/// imaginary part for the complex scalars); `vectors` with the column-major `n x n` eigenvectors.
+/// `input` is `[n, n, b...]`. Per item, `values` receives the `n` non-decreasing eigenvalues in the
+/// scalar type (zero imaginary part for the complex scalars) and `vectors` the column-major `n x n`
+/// eigenvectors.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`] when the descriptor does not describe `n x n` or the vector count
-/// overflows, and [`Error::NonConvergence`] when faer fails to converge.
+/// [`Error::InvalidArgument`] when `input` is not a batch of square matrices or the vector count
+/// overflows, and [`Error::NonConvergence`] for the lowest-indexed item faer fails to converge on.
+/// The outputs are empty on error.
 ///
 /// # Examples
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{eigh::eigh, Op, Parallel};
+/// use tlinalg::{eigh::eigh, LanePlan, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 1.0];
 /// let (mut w, mut v) = (Vec::new(), Vec::new());
-/// eigh(Op::Eigh, 2, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w, &mut v, Parallel::Sequential).unwrap();
+/// eigh(
+///     Op::Eigh, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w, &mut v,
+///     Parallel::Sequential, LanePlan::sequential(),
+/// ).unwrap();
 /// assert_eq!(w, [1.0, 2.0]);
 /// assert_eq!(v.len(), 4);
 /// ```
 pub fn eigh<T: FaerScalar>(
     op: Op,
-    n: usize,
     input: RawStridedRef<'_, T>,
     values: &mut Vec<T>,
     vectors: &mut Vec<T>,
     par: Parallel<'_>,
+    plan: LanePlan<'_>,
 ) -> Result<()> {
-    let mat = mat_ref(op, "input", &input, n, n)?;
-    let _ = checked_product(op, "eigenvector matrix", &[n, n])?;
-    values.clear();
-    vectors.clear();
-    // faer's eigensolvers do not accept an empty matrix; there is nothing to decompose.
-    if n == 0 {
-        return Ok(());
-    }
-    let mut diag = Diag::<T::Entity>::zeros(n);
-    let mut v_mat = Mat::<T::Entity>::zeros(n, n);
-    let mut mem = MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<T::Entity>(
-        n,
-        ComputeEigenvectors::Yes,
-        faer_par(par),
-        Default::default(),
-    ));
-    with_parallel(par, |par| {
-        faer::linalg::evd::self_adjoint_evd(
-            mat,
-            diag.as_mut(),
-            Some(v_mat.as_mut()),
-            par,
-            MemStack::new(&mut mem),
-            Default::default(),
-        )
-        .map_err(|_| Error::NonConvergence { op })
-    })?;
-    for index in 0..n {
-        values.push(T::from_real(T::real_from_entity(diag[index])));
-    }
-    push_mat(vectors, v_mat.as_ref());
-    Ok(())
+    let input = BatchedRef::square(op, "input", input)?;
+    let n = input.rows();
+    let v_len = checked_product(op, "eigenvector matrix", &[n, n])?;
+    batch::run(
+        op,
+        input.batch(),
+        par,
+        plan,
+        &mut (out(values, n), out(vectors, v_len)),
+        |par| EighScratch::<T::Entity>::new(n, ComputeEigenvectors::Yes, par),
+        |index, (values, vectors), scratch, par| {
+            if n == 0 {
+                return Ok(());
+            }
+            decompose(op, input.item(index), true, scratch, par)?;
+            for i in 0..n {
+                values.push(T::from_real(T::real_from_entity(scratch.values[i])));
+            }
+            push_mat(vectors, scratch.vectors.as_ref());
+            Ok(())
+        },
+    )
 }

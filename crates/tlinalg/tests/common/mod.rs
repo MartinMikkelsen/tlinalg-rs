@@ -2,15 +2,14 @@
 //! dense reference arithmetic carried out in `Complex64`.
 //!
 //! Provider-neutral on purpose: nothing here names faer or a provider type, only the four scalar
-//! types and the `Workspace` contract, so these helpers can move into a shared cross-provider
+//! types, so these helpers can move into a shared cross-provider
 //! testkit unchanged.
 
 #![allow(dead_code)]
 
-use core::mem::MaybeUninit;
+pub mod single;
 
 use num_complex::{Complex32, Complex64};
-use tlinalg::Workspace;
 
 /// A scalar the tests instantiate a kernel for.
 pub trait TestScalar: tlinalg::Scalar + Default + PartialEq + core::fmt::Debug {
@@ -190,30 +189,9 @@ pub fn padded<T: TestScalar>(a: &[T], m: usize, n: usize) -> (Vec<T>, [isize; 2]
     (storage, [1, lda as isize], offset as isize)
 }
 
-/// A workspace over the heap that counts its traffic.
+/// A placeholder for the scratch argument the pre-batching triangular solve took.
 #[derive(Default)]
-pub struct CountingWorkspace {
-    pub acquired: usize,
-    pub released: usize,
-}
-
-impl<T: tlinalg::Scalar + Default> Workspace<T> for CountingWorkspace {
-    fn acquire_zeroed(&mut self, len: usize) -> Vec<T> {
-        self.acquired += 1;
-        vec![T::default(); len]
-    }
-    fn acquire_capacity(&mut self, cap: usize) -> Vec<T> {
-        self.acquired += 1;
-        Vec::with_capacity(cap)
-    }
-    fn acquire_uninit(&mut self, len: usize) -> Vec<MaybeUninit<T>> {
-        self.acquired += 1;
-        (0..len).map(|_| MaybeUninit::uninit()).collect()
-    }
-    fn release(&mut self, _buf: Vec<T>) {
-        self.released += 1;
-    }
-}
+pub struct CountingWorkspace;
 
 /// Instantiate a generic test body as `$name::{f32, f64, c32, c64}` tests.
 #[macro_export]
@@ -238,4 +216,130 @@ macro_rules! for_each_scalar {
             }
         }
     };
+}
+
+/// How a test lays out the batch axes of a strided batch.
+#[derive(Clone, Copy, Debug)]
+pub enum Layout {
+    /// Items back to back, compact: every batch axis coalesces into one.
+    Compact,
+    /// Padded leading dimension, gaps between items and between axes: no axis merges.
+    Gapped,
+    /// Gapped, with the batch axes' strides in reverse order (the last batch axis is fastest in
+    /// memory).
+    Transposed,
+}
+
+/// A strided `[m, n, batch...]` buffer filled with poison outside the items.
+pub struct BatchBuf<T> {
+    pub storage: Vec<T>,
+    pub dims: Vec<usize>,
+    pub strides: Vec<isize>,
+    pub offset: isize,
+}
+
+impl<T> BatchBuf<T> {
+    pub fn view(&self) -> strided_view::RawStridedRef<'_, T> {
+        strided_view::RawStridedRef::new(&self.storage, &self.dims, &self.strides, self.offset)
+            .unwrap()
+    }
+
+    pub fn view_mut(&mut self) -> strided_view::RawStridedMut<'_, T> {
+        strided_view::RawStridedMut::new(&mut self.storage, &self.dims, &self.strides, self.offset)
+            .unwrap()
+    }
+
+    /// The element offset of item `index` (first batch axis fastest).
+    pub fn item_offset(&self, mut index: usize) -> usize {
+        let mut offset = self.offset;
+        for (&dim, &stride) in self.dims[2..].iter().zip(&self.strides[2..]) {
+            offset += (index % dim) as isize * stride;
+            index /= dim;
+        }
+        offset as usize
+    }
+
+    /// Item `index` gathered into a compact column-major buffer.
+    pub fn item(&self, index: usize) -> Vec<T>
+    where
+        T: Copy,
+    {
+        let base = self.item_offset(index);
+        let (m, n) = (self.dims[0], self.dims[1]);
+        let mut out = Vec::with_capacity(m * n);
+        for col in 0..n {
+            for row in 0..m {
+                out.push(
+                    self.storage
+                        [base + row * self.strides[0] as usize + col * self.strides[1] as usize],
+                );
+            }
+        }
+        out
+    }
+}
+
+/// Lay out `items` (compact `m x n` each) over `batch_dims`.
+pub fn batch_buf<T: TestScalar>(
+    items: &[Vec<T>],
+    m: usize,
+    n: usize,
+    batch_dims: &[usize],
+    layout: Layout,
+) -> BatchBuf<T> {
+    let count: usize = batch_dims.iter().product();
+    assert_eq!(items.len(), count);
+    let (lda, gap, axis_gap, offset) = match layout {
+        Layout::Compact => (m, 0, 0, 0),
+        Layout::Gapped | Layout::Transposed => (m + 1, 2, 3, 2),
+    };
+    let item_span = lda * n + gap;
+    let mut batch_strides = vec![0isize; batch_dims.len()];
+    let order: Vec<usize> = match layout {
+        Layout::Transposed => (0..batch_dims.len()).rev().collect(),
+        _ => (0..batch_dims.len()).collect(),
+    };
+    let mut stride = item_span.max(1);
+    for &axis in &order {
+        batch_strides[axis] = stride as isize;
+        stride = stride * batch_dims[axis].max(1) + axis_gap;
+    }
+    let poison = T::from_c64(Complex64::new(1.0e30, -1.0e30));
+    let mut buf = BatchBuf {
+        storage: vec![poison; offset + stride + lda * n + 1],
+        dims: [&[m, n][..], batch_dims].concat(),
+        strides: [&[1, lda as isize][..], &batch_strides].concat(),
+        offset: offset as isize,
+    };
+    for (index, item) in items.iter().enumerate() {
+        let base = buf.item_offset(index);
+        for col in 0..n {
+            for row in 0..m {
+                buf.storage[base + row + col * lda] = item[row + col * m];
+            }
+        }
+    }
+    buf
+}
+
+/// A two-thread pool, and the parallel token and a three-lane plan over it.
+pub fn lanes_pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap()
+}
+
+pub fn pool_token(pool: &rayon::ThreadPool) -> tlinalg::Parallel<'_> {
+    tlinalg::Parallel::Pool {
+        pool,
+        budget: core::num::NonZeroUsize::new(2).unwrap(),
+    }
+}
+
+pub fn three_lanes() -> tlinalg::LanePlan<'static> {
+    tlinalg::LanePlan {
+        lanes: 3,
+        item_parallel: tlinalg::Parallel::Sequential,
+    }
 }

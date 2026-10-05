@@ -1,7 +1,6 @@
-//! faer-backed thin QR and column-pivoted (rank-revealing) QR.
+//! faer-backed batched thin QR and column-pivoted (rank-revealing) QR.
 //!
-//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0). The entry points
-//! are per matrix; the host keeps its batch iteration.
+//! Moved from `tenferro-linalg`'s faer backend (same project, MIT OR Apache-2.0).
 //!
 //! Both return the **raw** faer factors: no sign/phase gauge is applied, matching the
 //! pre-extraction `qr` and `rank_revealing_qr` paths (the positive-diagonal gauge of the compact
@@ -10,88 +9,200 @@
 //! the host; [`magnitude`] is the diagonal measure it was computed with.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::{Conj, Mat};
+use faer::{Conj, Mat, MatRef};
 use strided_view::RawStridedRef;
 
-use crate::util::{checked_product, invalid, mat_ref, push_masked, push_mat};
-use crate::{with_parallel, FaerScalar, Op, Parallel, Result};
+use crate::batch::{self, out, BatchedRef, Push};
+use crate::util::{checked_product, invalid, push_masked, push_mat};
+use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
 
-/// Thin QR of one `m x n` matrix, `A = Q R`.
-///
-/// `q` is cleared and filled with the column-major `m x min(m, n)` factor with orthonormal columns;
-/// `r` with the column-major upper-trapezoidal `min(m, n) x n` factor.
-///
-/// # Errors
-///
-/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when the descriptor does not describe
-/// `m x n` or an output size overflows.
-///
-/// # Examples
-///
-/// ```
-/// use strided_view::RawStridedRef;
-/// use tlinalg::{qr::qr, Op, Parallel};
-///
-/// let a = [3.0_f64, 4.0];
-/// let (mut q, mut r) = (Vec::new(), Vec::new());
-/// qr(Op::Qr, 2, 1, RawStridedRef::new(&a, &[2, 1], &[1, 2], 0).unwrap(), &mut q, &mut r, Parallel::Sequential).unwrap();
-/// assert!((r[0].abs() - 5.0).abs() < 1e-12);
-/// ```
-pub fn qr<T: FaerScalar>(
-    op: Op,
-    m: usize,
-    n: usize,
-    input: RawStridedRef<'_, T>,
-    q: &mut Vec<T>,
-    r: &mut Vec<T>,
-    par: Parallel<'_>,
-) -> Result<()> {
-    let mat = mat_ref(op, "input", &input, m, n)?;
-    let k = m.min(n);
-    let _ = checked_product(op, "Q", &[m, k])?;
-    let _ = checked_product(op, "R", &[k, n])?;
-    q.clear();
-    r.clear();
-    let block_size =
-        faer::linalg::qr::no_pivoting::factor::recommended_block_size::<T::Entity>(m, n);
-    let mut work = Mat::<T::Entity>::zeros(m, n);
-    work.copy_from(mat);
-    let mut coeff = Mat::<T::Entity>::zeros(block_size, k);
-    let mut q_mat = Mat::<T::Entity>::identity(m, k);
-    with_parallel(par, |par| {
-        let mut mem = MemBuffer::new(
-            faer::linalg::qr::no_pivoting::factor::qr_in_place_scratch::<T::Entity>(
+/// Lane scratch for `m x n` QR factorizations, plain or column-pivoted.
+struct QrScratch<E: faer::traits::ComplexField> {
+    work: Mat<E>,
+    coeff: Mat<E>,
+    q: Mat<E>,
+    permutation: Vec<usize>,
+    inverse_permutation: Vec<usize>,
+    factor_mem: MemBuffer,
+    apply_mem: MemBuffer,
+}
+
+impl<E: faer::traits::ComplexField> QrScratch<E> {
+    fn new(m: usize, n: usize, pivoting: bool, par: faer::Par) -> Self {
+        let k = m.min(n);
+        let block_size = faer::linalg::qr::no_pivoting::factor::recommended_block_size::<E>(m, n);
+        let factor_req = if pivoting {
+            faer::linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, E>(
                 m,
                 n,
                 block_size,
                 par,
                 Default::default(),
+            )
+        } else {
+            faer::linalg::qr::no_pivoting::factor::qr_in_place_scratch::<E>(
+                m,
+                n,
+                block_size,
+                par,
+                Default::default(),
+            )
+        };
+        Self {
+            work: Mat::zeros(m, n),
+            coeff: Mat::zeros(block_size, k),
+            q: Mat::zeros(m, k),
+            permutation: vec![0; if pivoting { n } else { 0 }],
+            inverse_permutation: vec![0; if pivoting { n } else { 0 }],
+            factor_mem: MemBuffer::new(factor_req),
+            apply_mem: MemBuffer::new(
+                faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<E>(
+                    m, block_size, k,
+                ),
             ),
-        );
-        faer::linalg::qr::no_pivoting::factor::qr_in_place(
-            work.as_mut(),
-            coeff.as_mut(),
-            par,
-            MemStack::new(&mut mem),
-            Default::default(),
-        );
-        let mut mem = MemBuffer::new(
-            faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<
-                T::Entity,
-            >(m, block_size, k),
-        );
+        }
+    }
+
+    /// Build the thin `Q` from the reflectors in `work`/`coeff`.
+    fn form_q(&mut self, par: faer::Par) {
+        let k = self.q.ncols();
+        // `Q = H_1 ... H_k I`: reset the lane buffer to the thin identity first.
+        self.q.fill(<E as faer::traits::ComplexField>::zero_impl());
+        for i in 0..k {
+            self.q[(i, i)] = <E as faer::traits::ComplexField>::one_impl();
+        }
         faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
-            work.as_ref().subcols(0, k),
-            coeff.as_ref(),
+            self.work.as_ref().subcols(0, k),
+            self.coeff.as_ref(),
             Conj::No,
-            q_mat.as_mut(),
+            self.q.as_mut(),
             par,
-            MemStack::new(&mut mem),
+            MemStack::new(&mut self.apply_mem),
         );
-    });
-    push_mat(q, q_mat.as_ref());
-    push_masked(r, work.as_ref(), k, n, |row, col| row <= col);
+    }
+}
+
+fn push_factors<T: FaerScalar>(
+    scratch: &QrScratch<T::Entity>,
+    q: &mut impl Push<T>,
+    r: &mut impl Push<T>,
+) {
+    let k = scratch.q.ncols();
+    push_mat(q, scratch.q.as_ref());
+    push_masked(
+        r,
+        scratch.work.as_ref(),
+        k,
+        scratch.work.ncols(),
+        |row, col| row <= col,
+    );
+}
+
+fn qr_item<T: FaerScalar>(
+    mat: MatRef<'_, T::Entity>,
+    q: &mut impl Push<T>,
+    r: &mut impl Push<T>,
+    scratch: &mut QrScratch<T::Entity>,
+    par: faer::Par,
+) {
+    scratch.work.copy_from(mat);
+    scratch
+        .coeff
+        .fill(<T::Entity as faer::traits::ComplexField>::zero_impl());
+    faer::linalg::qr::no_pivoting::factor::qr_in_place(
+        scratch.work.as_mut(),
+        scratch.coeff.as_mut(),
+        par,
+        MemStack::new(&mut scratch.factor_mem),
+        Default::default(),
+    );
+    scratch.form_q(par);
+    push_factors::<T>(scratch, q, r);
+}
+
+fn rank_revealing_qr_item<T: FaerScalar>(
+    op: Op,
+    mat: MatRef<'_, T::Entity>,
+    (q, r, permutation): (&mut impl Push<T>, &mut impl Push<T>, &mut impl Push<i64>),
+    scratch: &mut QrScratch<T::Entity>,
+    par: faer::Par,
+) -> Result<()> {
+    scratch.work.copy_from(mat);
+    scratch
+        .coeff
+        .fill(<T::Entity as faer::traits::ComplexField>::zero_impl());
+    // Following faer 0.24's public column-pivoted QR factor API; the provider's forward
+    // permutation is the public gather convention.
+    faer::linalg::qr::col_pivoting::factor::qr_in_place(
+        scratch.work.as_mut(),
+        scratch.coeff.as_mut(),
+        &mut scratch.permutation,
+        &mut scratch.inverse_permutation,
+        par,
+        MemStack::new(&mut scratch.factor_mem),
+        Default::default(),
+    );
+    scratch.form_q(par);
+    push_factors::<T>(scratch, q, r);
+    for &column in &scratch.permutation {
+        permutation.push(
+            i64::try_from(column).map_err(|_| {
+                invalid(op, "configuration", "column permutation exceeds i64 range")
+            })?,
+        );
+    }
     Ok(())
+}
+
+/// Thin QR of every `m x n` matrix of a batch, `A = Q R`.
+///
+/// `input` is `[m, n, b...]`. Per item, `q` receives the column-major `m x min(m, n)` factor with
+/// orthonormal columns and `r` the column-major upper-trapezoidal `min(m, n) x n` factor.
+///
+/// # Errors
+///
+/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when `input` has rank below 2 or an
+/// output size overflows. The outputs are empty on error.
+///
+/// # Examples
+///
+/// ```
+/// use strided_view::RawStridedRef;
+/// use tlinalg::{qr::qr, LanePlan, Op, Parallel};
+///
+/// let a = [3.0_f64, 4.0];
+/// let (mut q, mut r) = (Vec::new(), Vec::new());
+/// qr(
+///     Op::Qr, RawStridedRef::new(&a, &[2, 1], &[1, 2], 0).unwrap(), &mut q, &mut r,
+///     Parallel::Sequential, LanePlan::sequential(),
+/// ).unwrap();
+/// assert!((r[0].abs() - 5.0).abs() < 1e-12);
+/// ```
+pub fn qr<T: FaerScalar>(
+    op: Op,
+    input: RawStridedRef<'_, T>,
+    q: &mut Vec<T>,
+    r: &mut Vec<T>,
+    par: Parallel<'_>,
+    plan: LanePlan<'_>,
+) -> Result<()> {
+    let input = BatchedRef::new(op, "input", input)?;
+    let (m, n) = (input.rows(), input.cols());
+    let k = m.min(n);
+    let q_len = checked_product(op, "Q", &[m, k])?;
+    let r_len = checked_product(op, "R", &[k, n])?;
+    batch::run(
+        op,
+        input.batch(),
+        par,
+        plan,
+        &mut (out(q, q_len), out(r, r_len)),
+        |par| QrScratch::<T::Entity>::new(m, n, false, par),
+        |index, (q, r), scratch, par| {
+            qr_item::<T>(input.item(index), q, r, scratch, par);
+            Ok(())
+        },
+    )
 }
 
 /// The magnitude a rank decision compares against its tolerance: `|x|` for the real scalars and
@@ -112,98 +223,54 @@ pub fn magnitude<T: FaerScalar>(value: T) -> f64 {
     T::entity_magnitude(T::entity_slice(core::slice::from_ref(&value))[0])
 }
 
-/// Column-pivoted QR of one `m x n` matrix, `A P = Q R`.
+/// Column-pivoted QR of every `m x n` matrix of a batch, `A P = Q R`.
 ///
-/// `q` (`m x min(m, n)`) and `r` (`min(m, n) x n`, upper trapezoidal) are cleared and filled by
-/// `push`, column-major. The returned vector is the forward column permutation in the public
-/// gather convention: column `j` of `A P` is column `permutation[j]` of `A`.
+/// `input` is `[m, n, b...]`. Per item, `q` (`m x min(m, n)`) and `r` (`min(m, n) x n`, upper
+/// trapezoidal) receive column-major factors, and `permutation` receives `n` column indices in the
+/// public gather convention: column `j` of `A P` is column `permutation[j]` of `A`.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when the descriptor does not describe
-/// `m x n`, an output size overflows, or a column index does not fit `i64`.
+/// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when `input` has rank below 2, an
+/// output size overflows, or a column index does not fit `i64`. The outputs are empty on error.
 ///
 /// # Examples
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{qr::rank_revealing_qr, Op, Parallel};
+/// use tlinalg::{qr::rank_revealing_qr, LanePlan, Op, Parallel};
 ///
 /// let a = [1.0_f64, 0.0, 0.0, 5.0];
-/// let (mut q, mut r) = (Vec::new(), Vec::new());
-/// let perm = rank_revealing_qr(
-///     Op::RankRevealingQr, 2, 2, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
-///     &mut q, &mut r, Parallel::Sequential,
+/// let (mut q, mut r, mut perm) = (Vec::new(), Vec::new(), Vec::new());
+/// rank_revealing_qr(
+///     Op::RankRevealingQr, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
+///     &mut q, &mut r, &mut perm, Parallel::Sequential, LanePlan::sequential(),
 /// ).unwrap();
 /// assert_eq!(perm, [1, 0]);
 /// ```
 pub fn rank_revealing_qr<T: FaerScalar>(
     op: Op,
-    m: usize,
-    n: usize,
     input: RawStridedRef<'_, T>,
     q: &mut Vec<T>,
     r: &mut Vec<T>,
+    permutation: &mut Vec<i64>,
     par: Parallel<'_>,
-) -> Result<Vec<i64>> {
-    let mat = mat_ref(op, "input", &input, m, n)?;
+    plan: LanePlan<'_>,
+) -> Result<()> {
+    let input = BatchedRef::new(op, "input", input)?;
+    let (m, n) = (input.rows(), input.cols());
     let k = m.min(n);
-    let _ = checked_product(op, "Q", &[m, k])?;
-    let _ = checked_product(op, "R", &[k, n])?;
-    q.clear();
-    r.clear();
-    let block_size =
-        faer::linalg::qr::no_pivoting::factor::recommended_block_size::<T::Entity>(m, n);
-    let mut work = Mat::<T::Entity>::zeros(m, n);
-    work.copy_from(mat);
-    let mut coeff = Mat::<T::Entity>::zeros(block_size, k);
-    let mut permutation = vec![0usize; n];
-    let mut inverse_permutation = vec![0usize; n];
-    let mut q_mat = Mat::<T::Entity>::identity(m, k);
-    with_parallel(par, |par| {
-        // Following faer 0.24's public column-pivoted QR factor API; the provider's forward
-        // permutation is the public gather convention.
-        let mut mem = MemBuffer::new(
-            faer::linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, T::Entity>(
-                m,
-                n,
-                block_size,
-                par,
-                Default::default(),
-            ),
-        );
-        faer::linalg::qr::col_pivoting::factor::qr_in_place(
-            work.as_mut(),
-            coeff.as_mut(),
-            &mut permutation,
-            &mut inverse_permutation,
-            par,
-            MemStack::new(&mut mem),
-            Default::default(),
-        );
-        let mut mem = MemBuffer::new(
-            faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<
-                T::Entity,
-            >(m, block_size, k),
-        );
-        faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
-            work.as_ref().subcols(0, k),
-            coeff.as_ref(),
-            Conj::No,
-            q_mat.as_mut(),
-            par,
-            MemStack::new(&mut mem),
-        );
-    });
-    push_mat(q, q_mat.as_ref());
-    push_masked(r, work.as_ref(), k, n, |row, col| row <= col);
-    // Collecting a `Vec<usize>` into a `Vec<i64>` of the same layout reuses the allocation, as the
-    // pre-extraction conversion did.
-    permutation
-        .into_iter()
-        .map(|column| {
-            i64::try_from(column)
-                .map_err(|_| invalid(op, "configuration", "column permutation exceeds i64 range"))
-        })
-        .collect()
+    let q_len = checked_product(op, "Q", &[m, k])?;
+    let r_len = checked_product(op, "R", &[k, n])?;
+    batch::run(
+        op,
+        input.batch(),
+        par,
+        plan,
+        &mut (out(q, q_len), out(r, r_len), out(permutation, n)),
+        |par| QrScratch::<T::Entity>::new(m, n, true, par),
+        |index, (q, r, permutation), scratch, par| {
+            rank_revealing_qr_item::<T>(op, input.item(index), (q, r, permutation), scratch, par)
+        },
+    )
 }

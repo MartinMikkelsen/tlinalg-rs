@@ -4,19 +4,21 @@
 //! the LAPACK packed format — unit-lower `L` below the diagonal, `U` on and above it, one-based
 //! row-swap pivots — so the factors stay interchangeable with a LAPACK implementation.
 //!
-//! # Host contract
+//! # Batches
 //!
-//! Every entry point operates on one **chunk** of whole matrices: `lu` holds
-//! `matrices * m * n` elements, and the same whole-matrix count applies to the pivots, the parity
-//! and any right-hand side. The host owns the batch split and the fan-out: it partitions the batch
-//! with `chunk = batch.div_ceil(lanes)` and calls these functions once per chunk with
-//! [`crate::Parallel::Sequential`], or once with the resolved item policy when it decided
-//! on a single lane. Nothing here re-derives lanes from a thread count, and nothing here validates
-//! the whole batch — each call validates only the buffer lengths it receives.
+//! Every entry point operates on a whole batch, on the host's lane plan (see
+//! `docs/design/batched-api.md`): the factors and right-hand sides are the host's compact,
+//! batch-contiguous buffers, updated in place, and the batch is split into
+//! `batch.div_ceil(lanes)`-item chunks that run as tasks on the caller's pool. This replaces the
+//! host-side chunk fan-out the pre-extraction code used. The prepared solve reads its factors and
+//! pivots through strided descriptors, so a host can broadcast one factorization (stride 0 on a batch
+//! axis) against many right-hand sides.
 //!
-//! Scratch is native and per chunk: four permutation vectors and one faer `MemBuffer`, reused
-//! across every matrix of the chunk. Nothing in this family takes pooled buffers, so it needs no
-//! [`crate::Workspace`].
+//! Scratch is native and per lane: four permutation vectors and one faer `MemBuffer`, reused across
+//! every matrix of the lane.
+//!
+//! In-place buffers are not rolled back on error: items before the failing one (and items of other
+//! lanes) may already hold their results.
 
 use core::marker::PhantomData;
 
@@ -24,9 +26,10 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::prelude::ReborrowMut;
 use faer::{Conj, MatMut, MatRef};
 
-use crate::{Error, Op, Parallel, Result};
+use strided_view::RawStridedRef;
 
-use crate::{faer_par, with_parallel, FaerScalar};
+use crate::batch::{self, in_place, same_batch, BatchAxes, BatchedRef};
+use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
 
 /// A caller-supplied argument was invalid.
 fn invalid(op: Op, role: &'static str, detail: impl Into<String>) -> Error {
@@ -56,14 +59,12 @@ fn singular(op: Op) -> Error {
     Error::Singular { op }
 }
 
-/// Reusable per-chunk state for factoring a run of `m x n` matrices.
+/// Reusable per-lane state for factoring a run of `m x n` matrices.
 ///
 /// Typed by the scalar it was sized for, so mixing a scratch with another scalar is a compile
-/// error. The shape is not part of the type: [`FactorScratch::new`] records `m` and `n` and every
-/// entry point rejects a call whose shape disagrees, before touching the buffers.
-pub struct FactorScratch<T: FaerScalar> {
+/// error. The batch driver builds one per lane for the call's shape.
+pub(crate) struct FactorScratch<T: FaerScalar> {
     m: usize,
-    n: usize,
     k: usize,
     perm: Vec<usize>,
     perm_inv: Vec<usize>,
@@ -77,12 +78,9 @@ impl<T: FaerScalar> FactorScratch<T> {
     /// Size the scratch for `m x n` matrices and the given parallelism.
     ///
     /// The parallelism participates because faer sizes its scratch per thread.
-    #[must_use]
-    pub fn new(m: usize, n: usize, par: Parallel<'_>) -> Self {
-        let par = faer_par(par);
+    fn new(m: usize, n: usize, par: faer::Par) -> Self {
         Self {
             m,
-            n,
             k: m.min(n),
             perm: vec![0; m],
             perm_inv: vec![0; m],
@@ -98,24 +96,6 @@ impl<T: FaerScalar> FactorScratch<T> {
             ),
             scalar: PhantomData,
         }
-    }
-
-    /// Reject a call whose shape disagrees with the shape this scratch was sized for.
-    ///
-    /// The scratch carries the permutation vectors and the faer buffer for exactly one shape, so a
-    /// mismatch has to be refused instead of producing an out-of-range index inside faer.
-    fn check_shape(&self, op: Op, m: usize, n: usize) -> Result<()> {
-        if (self.m, self.n) == (m, n) {
-            return Ok(());
-        }
-        Err(invalid(
-            op,
-            "configuration",
-            format!(
-                "scratch was sized for {}x{} but the call uses {m}x{n}",
-                self.m, self.n
-            ),
-        ))
     }
 
     /// Factor one compact column-major matrix in place and write its one-based swap sequence into
@@ -150,7 +130,7 @@ impl<T: FaerScalar> FactorScratch<T> {
             *slot = idx;
             *pos = idx;
         }
-        // INVARIANT: `check_shape` fixed this scratch to the call's `(m, n)`, so `self.k ==
+        // INVARIANT: the driver builds this scratch per lane for the call's `(m, n)`, so `self.k ==
         // m.min(n)`. `perm` is a permutation of `0..m` (faer contract) and the caller passed
         // `ipiv.len() == k <= m`, so every index below is in bounds.
         for (step, slot) in ipiv.iter_mut().enumerate().take(self.k) {
@@ -188,22 +168,28 @@ fn check_batches(op: Op, buffers: [(usize, usize); 3], batch: usize) -> Result<(
 
 /// Factor every compact column-major `m x n` matrix of `lu` in place.
 ///
-/// `pivots` receives `min(m, n)` one-based pivots per matrix and `parity` one permutation parity
-/// per matrix. Exactly singular matrices are **not** an error, matching LAPACK `?getrf` with
-/// positive `info`.
-///
-/// `scratch` must have been built by [`FactorScratch::new`] for the same `m`, `n` and scalar.
+/// `lu` holds `batch = parity.len()` matrices; `pivots` receives `min(m, n)` one-based pivots per
+/// matrix and `parity` one permutation parity per matrix. Exactly singular matrices are **not** an
+/// error, matching LAPACK `?getrf` with positive `info`.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Inconsistent`] when the buffers describe different batches,
-/// [`Error::InvalidArgument`] when the scratch shape disagrees, and [`Error::InvalidArgument`] when
-/// faer returns an invalid row permutation.
-// INVARIANT: the argument list mirrors the host call site, which splits a batch into three
-// separate chunk iterators plus an already-resolved policy. Grouping them into a struct would add a
-// wrapper per chunk without removing any argument (the host holds the three slices separately).
+/// Returns [`Error::Inconsistent`] when the buffers describe different batches, and
+/// [`Error::InvalidArgument`] when faer returns an invalid row permutation (lowest-indexed item).
+///
+/// # Examples
+///
+/// ```
+/// use tlinalg::{packed_lu::factor, LanePlan, Op, Parallel};
+///
+/// let mut lu = [1.0_f64, 3.0, 2.0, 4.0];
+/// let (mut pivots, mut parity) = ([0_i32; 2], [0.0_f64; 1]);
+/// factor(Op::LuFactor, 2, 2, &mut lu, &mut pivots, &mut parity, Parallel::Sequential, LanePlan::sequential()).unwrap();
+/// assert_eq!((pivots, parity), ([2, 2], [-1.0]));
+/// ```
+// INVARIANT: shape, the three in-place batch buffers, token and plan are distinct operands.
 #[allow(clippy::too_many_arguments)]
-pub fn factor_chunk<T: FaerScalar>(
+pub fn factor<T: FaerScalar>(
     op: Op,
     m: usize,
     n: usize,
@@ -211,7 +197,7 @@ pub fn factor_chunk<T: FaerScalar>(
     pivots: &mut [i32],
     parity: &mut [T],
     par: Parallel<'_>,
-    scratch: &mut FactorScratch<T>,
+    plan: LanePlan<'_>,
 ) -> Result<()> {
     let k = m.min(n);
     let matrix_len = checked_product(op, "matrix shape", &[m, n])?;
@@ -224,22 +210,25 @@ pub fn factor_chunk<T: FaerScalar>(
     if matrix_len == 0 || batch == 0 {
         return Ok(());
     }
-    scratch.check_shape(op, m, n)?;
-    with_parallel(par, |par| {
-        // INVARIANT: lengths were checked above and `matrix_len > 0` implies `k > 0`, so the three
-        // chunk iterators yield exactly `batch` aligned items. faer owns any threading inside
-        // `lu_in_place`, so this loop stays serial and reuses one scratch set.
-        for ((matrix, ipiv), parity) in lu
-            .chunks_exact_mut(matrix_len)
-            .zip(pivots.chunks_exact_mut(k))
-            .zip(parity.iter_mut())
-        {
-            let mat = MatMut::from_column_major_slice_mut(T::entity_slice_mut(matrix), m, n);
-            let odd = scratch.factor(par, mat, ipiv, op)?;
-            *parity = T::parity(odd);
-        }
-        Ok(())
-    })
+    batch::run(
+        op,
+        batch,
+        par,
+        plan,
+        &mut (
+            in_place(lu, matrix_len, "packed LU"),
+            in_place(pivots, k, "pivots"),
+            in_place(parity, 1, "parity"),
+        ),
+        |par| FactorScratch::<T>::new(m, n, par),
+        |index, (lu, pivots, parity), scratch, par| {
+            let mat =
+                MatMut::from_column_major_slice_mut(T::entity_slice_mut(lu.item(index)), m, n);
+            let odd = scratch.factor(par, mat, pivots.item(index), op)?;
+            parity.item(index)[0] = T::parity(odd);
+            Ok(())
+        },
+    )
 }
 
 /// Apply a one-based LAPACK swap sequence to the rows of a compact column-major `n x nrhs` block,
@@ -298,13 +287,12 @@ pub fn validate_pivots(op: Op, n: usize, ipiv: &[i32]) -> Result<()> {
 fn solve_one<T: FaerScalar>(
     par: faer::Par,
     (n, nrhs): (usize, usize),
-    matrix: &[T],
+    lu: MatRef<'_, T::Entity>,
     ipiv: &[i32],
     rhs: &mut [T],
     (transpose_a, conjugate_a): (bool, bool),
 ) {
     let conj = if conjugate_a { Conj::Yes } else { Conj::No };
-    let lu = MatRef::from_column_major_slice(T::entity_slice(matrix), n, n);
     if transpose_a {
         {
             let mut x = MatMut::from_column_major_slice_mut(T::entity_slice_mut(rhs), n, nrhs);
@@ -333,80 +321,170 @@ fn solve_one<T: FaerScalar>(
     }
 }
 
-/// Solve `op(A) X = B` for every matrix of the chunk from packed partial-pivot factors.
+/// The pivot rows of one item of a `[n, b...]` pivot descriptor.
+struct BatchedPivots<'a> {
+    pivots: RawStridedRef<'a, i32>,
+    axes: BatchAxes,
+    n: usize,
+}
+
+impl<'a> BatchedPivots<'a> {
+    fn new(
+        op: Op,
+        n: usize,
+        lu: &BatchedRef<'_, impl FaerScalar>,
+        pivots: RawStridedRef<'a, i32>,
+    ) -> Result<Self> {
+        let dims = pivots.dims();
+        if dims.first() != Some(&n) {
+            return Err(invalid(
+                op,
+                "configuration",
+                format!("pivots describe {dims:?}, expected [{n}, batch...]"),
+            ));
+        }
+        same_batch(op, "pivots", lu.batch_dims(), &dims[1..])?;
+        if n > 1 && pivots.strides()[0] != 1 {
+            return Err(invalid(
+                op,
+                "configuration",
+                "pivots must be contiguous within an item",
+            ));
+        }
+        Ok(Self {
+            axes: BatchAxes::new(&dims[1..], &pivots.strides()[1..]),
+            pivots,
+            n,
+        })
+    }
+
+    /// The `n` pivots of item `index` (below the batch count, `n > 0`).
+    fn item(&self, index: usize) -> &'a [i32] {
+        // SAFETY: `RawStridedRef::new` validated every reachable offset against the borrowed data.
+        // Item `index` starts at its batch offset and covers `n` consecutive elements (the core
+        // stride is 1, checked in `new`), all of which are reachable offsets, so the slice lies in
+        // the borrowed data for `'a`.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.pivots.ptr().wrapping_offset(self.axes.offset(index)),
+                self.n,
+            )
+        }
+    }
+}
+
+/// Solve `op(A) X = B` for every system of a batch from packed partial-pivot factors.
 ///
-/// `output` enters holding the compact column-major RHS batch and leaves holding the solution. The
-/// factors must be nonsingular.
+/// `packed_lu` is `[n, n, b...]` and `pivots` is `[n, b...]` (contiguous within an item), both
+/// borrowed strided descriptors with the same batch shape; a stride of 0 on a batch axis broadcasts
+/// one factorization over many right-hand sides. `output` is the compact, batch-contiguous
+/// `n x nrhs` right-hand-side batch; it enters holding `B` and leaves holding `X`. The factors must
+/// be nonsingular.
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidArgument`] for a pivot outside `1..=n` and [`Error::Inconsistent`] when
-/// the buffers describe different batches. Pivots are validated for the whole chunk **before** any
-/// output is written.
-// INVARIANT: the argument list mirrors the host call site (see `factor_chunk`).
+/// Returns [`Error::InvalidArgument`] for a pivot outside `1..=n` or a malformed descriptor, and
+/// [`Error::Inconsistent`] when `output` does not hold one right-hand side per item. Pivots are
+/// validated for the whole batch **before** any output is written.
+///
+/// # Examples
+///
+/// ```
+/// use strided_view::RawStridedRef;
+/// use tlinalg::{packed_lu::solve_prepared, LanePlan, Op, Parallel};
+///
+/// // A = diag(2, 4) is its own packed factor with identity pivots.
+/// let lu = [2.0_f64, 0.0, 0.0, 4.0];
+/// let pivots = [1_i32, 2];
+/// let mut x = [2.0_f64, 8.0];
+/// solve_prepared(
+///     Op::LuSolvePrepared,
+///     RawStridedRef::new(&lu, &[2, 2], &[1, 2], 0).unwrap(),
+///     RawStridedRef::new(&pivots, &[2], &[1], 0).unwrap(),
+///     1, &mut x, false, false, Parallel::Sequential, LanePlan::sequential(),
+/// ).unwrap();
+/// assert_eq!(x, [1.0, 2.0]);
+/// ```
+// INVARIANT: factors, pivots, right-hand-side shape and buffer, the two solve flags, token and
+// plan are distinct operands of the prepared-solve contract.
 #[allow(clippy::too_many_arguments)]
-pub fn solve_prepared_chunk<T: FaerScalar>(
+pub fn solve_prepared<T: FaerScalar>(
     op: Op,
-    n: usize,
+    packed_lu: RawStridedRef<'_, T>,
+    pivots: RawStridedRef<'_, i32>,
     nrhs: usize,
-    packed_lu: &[T],
-    pivots: &[i32],
     output: &mut [T],
     transpose_a: bool,
     conjugate_a: bool,
     par: Parallel<'_>,
+    plan: LanePlan<'_>,
 ) -> Result<()> {
-    let matrix_len = checked_product(op, "matrix", &[n, n])?;
+    let lu = BatchedRef::square(op, "packed LU", packed_lu)?;
+    let n = lu.rows();
     let rhs_len = checked_product(op, "rhs", &[n, nrhs])?;
-    if matrix_len == 0 || rhs_len == 0 {
+    if rhs_len == 0 {
         return Ok(());
     }
-    let batch = packed_lu.len() / matrix_len;
-    check_batches(
+    let pivots = BatchedPivots::new(op, n, &lu, pivots)?;
+    let batch = lu.batch();
+    if output.len() != checked_product(op, "rhs batch", &[rhs_len, batch])? {
+        return Err(Error::Inconsistent {
+            op,
+            detail: "packed LU, pivot, and batch buffers describe different batches",
+        });
+    }
+    for index in 0..batch {
+        validate_pivots(op, n, pivots.item(index))?;
+    }
+    batch::run(
         op,
-        [
-            (matrix_len, packed_lu.len()),
-            (n, pivots.len()),
-            (rhs_len, output.len()),
-        ],
         batch,
-    )?;
-    validate_pivots(op, n, pivots)?;
-    with_parallel(par, |par| {
-        // INVARIANT: lengths were checked above, so the chunk iterators yield exactly `batch`
-        // aligned nonempty items, and all pivots are in range for `apply_row_swaps`.
-        for ((matrix, ipiv), rhs) in packed_lu
-            .chunks_exact(matrix_len)
-            .zip(pivots.chunks_exact(n))
-            .zip(output.chunks_exact_mut(rhs_len))
-        {
+        par,
+        plan,
+        &mut (in_place(output, rhs_len, "rhs batch"),),
+        |_| (),
+        |index, (output,), (), par| {
+            // INVARIANT: every pivot was validated above, so `apply_row_swaps` stays in range.
             solve_one::<T>(
                 par,
                 (n, nrhs),
-                matrix,
-                ipiv,
-                rhs,
+                lu.item(index),
+                pivots.item(index),
+                output.item(index),
                 (transpose_a, conjugate_a),
             );
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 
-/// Factor and solve `A X = B` for every matrix of the chunk, keeping the packed factors.
+/// Factor and solve `A X = B` for every system of a batch, keeping the packed factors.
 ///
-/// `packed_lu` enters holding the compact `A` batch and leaves holding the packed factors;
-/// `pivots` receives one-based pivots; `output` enters holding the RHS batch and leaves holding `X`.
+/// `packed_lu` enters holding the compact `n x n` `A` batch and leaves holding the packed factors;
+/// `pivots` receives one-based pivots; `output` enters holding the compact `n x nrhs` RHS batch and
+/// leaves holding `X`.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Singular`] when a factor has an exactly zero `U` diagonal and there is a
-/// nonempty RHS to solve, [`Error::Inconsistent`] when the buffers describe different batches, and
-/// [`Error::InvalidArgument`] when the scratch shape disagrees. A zero-column RHS only factors,
-/// matching [`factor_chunk`] on singular input.
-// INVARIANT: the argument list mirrors the host call site (see `factor_chunk`).
+/// Returns [`Error::Singular`] for the lowest-indexed item whose factor has an exactly zero `U`
+/// diagonal when there is a nonempty RHS to solve, and [`Error::Inconsistent`] when the buffers
+/// describe different batches. A zero-column RHS only factors, matching [`factor`] on singular
+/// input.
+///
+/// # Examples
+///
+/// ```
+/// use tlinalg::{packed_lu::factor_solve, LanePlan, Op, Parallel};
+///
+/// let mut lu = [2.0_f64, 0.0, 0.0, 4.0];
+/// let mut pivots = [0_i32; 2];
+/// let mut x = [2.0_f64, 8.0];
+/// factor_solve(Op::LuFactorSolve, 2, 1, &mut lu, &mut pivots, &mut x, Parallel::Sequential, LanePlan::sequential()).unwrap();
+/// assert_eq!(x, [1.0, 2.0]);
+/// ```
+// INVARIANT: shape, the three in-place batch buffers, token and plan are distinct operands.
 #[allow(clippy::too_many_arguments)]
-pub fn factor_solve_chunk<T: FaerScalar>(
+pub fn factor_solve<T: FaerScalar>(
     op: Op,
     n: usize,
     nrhs: usize,
@@ -414,7 +492,7 @@ pub fn factor_solve_chunk<T: FaerScalar>(
     pivots: &mut [i32],
     output: &mut [T],
     par: Parallel<'_>,
-    scratch: &mut FactorScratch<T>,
+    plan: LanePlan<'_>,
 ) -> Result<()> {
     let matrix_len = checked_product(op, "matrix", &[n, n])?;
     let rhs_len = checked_product(op, "rhs", &[n, nrhs])?;
@@ -431,17 +509,21 @@ pub fn factor_solve_chunk<T: FaerScalar>(
         ],
         batch,
     )?;
-    scratch.check_shape(op, n, n)?;
     let zero = T::default();
-    with_parallel(par, |par| {
-        // INVARIANT: lengths were checked above; a zero-column RHS yields empty RHS blocks, which
-        // `chunks_mut` cannot express with a zero chunk size, so the RHS block is sliced by offset
-        // instead. faer owns any threading inside the factorization and the triangular solves.
-        for (index, (matrix, ipiv)) in packed_lu
-            .chunks_exact_mut(matrix_len)
-            .zip(pivots.chunks_exact_mut(n))
-            .enumerate()
-        {
+    batch::run(
+        op,
+        batch,
+        par,
+        plan,
+        &mut (
+            in_place(packed_lu, matrix_len, "packed LU"),
+            in_place(pivots, n, "pivots"),
+            in_place(output, rhs_len, "rhs batch"),
+        ),
+        |par| FactorScratch::<T>::new(n, n, par),
+        |index, (lu, pivots, output), scratch, par| {
+            let matrix = lu.item(index);
+            let ipiv = pivots.item(index);
             {
                 let mat = MatMut::from_column_major_slice_mut(T::entity_slice_mut(matrix), n, n);
                 scratch.factor(par, mat, ipiv, op)?;
@@ -450,11 +532,10 @@ pub fn factor_solve_chunk<T: FaerScalar>(
                 if (0..n).any(|i| matrix[i + i * n] == zero) {
                     return Err(singular(op));
                 }
-                let start = index * rhs_len;
-                let rhs = &mut output[start..start + rhs_len];
-                solve_one::<T>(par, (n, nrhs), matrix, ipiv, rhs, (false, false));
+                let lu = MatRef::from_column_major_slice(T::entity_slice(matrix), n, n);
+                solve_one::<T>(par, (n, nrhs), lu, ipiv, output.item(index), (false, false));
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }

@@ -8,11 +8,11 @@ placement, execution context and error wrapping.
 
 ## Crate
 
-`tlinalg` is the faer-backed provider. It owns the per-item kernels (SVD, packed LU, Cholesky,
+`tlinalg` is the faer-backed provider. It owns batched kernels (SVD, packed LU, Cholesky,
 triangular solve, LU and solve, full-pivot LU, QR and column-pivoted QR, Hermitian and general
-eigendecompositions, compact Householder QR) and the vocabulary its entry points take: borrowed
-strided I/O, scratch acquisition (`Workspace`), parallelism (`Parallel`), lane policy (`LanePlan`)
-and typed errors (`Error`). No tensor types.
+eigendecompositions, compact Householder QR), the batch loop and lane fan-out over them, and the
+vocabulary its entry points take: borrowed strided I/O, parallelism (`Parallel`), lane policy
+(`LanePlan`) and typed errors (`Error`). No tensor types.
 
 The interface a host requires of its linear-algebra providers is defined by the host: tenferro owns
 it and adapts each provider to it. The LAPACK/BLAS provider currently lives in
@@ -21,12 +21,16 @@ sibling crate; the two providers do not depend on each other.
 
 ## Contracts
 
-The crate documentation is the specification:
+Every entry point is batched, torch-style: one call per batch over a rank-`2 + B` strided
+descriptor, with the library owning the batch loop and the lane fan-out. The contract is
+[`docs/design/batched-api.md`](docs/design/batched-api.md).
+
+The crate documentation is the specification for the rest:
 
 * numerical conventions and failure behaviour — crate root of `tlinalg`;
 * the parallelism and budget contract — `tlinalg::Parallel`;
 * the batch lane contract — `tlinalg::LanePlan`;
-* buffer ownership and initialization — `tlinalg::Workspace`;
+* output assembly and lane scratch — `docs/design/batched-api.md`;
 * the error vocabulary — `tlinalg::Error`.
 
 ## Status

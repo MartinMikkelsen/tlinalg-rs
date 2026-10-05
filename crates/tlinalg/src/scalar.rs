@@ -79,21 +79,20 @@ pub trait ScalarEntity: crate::Scalar + Default + PartialEq {
 /// the complex one. The two need different faer entry points, so each scalar implements this in
 /// `crate::eig`.
 pub trait EigScalar: ScalarEntity {
-    /// Eigenvalues and column-major eigenvectors of `mat`, pushed into the cleared outputs.
+    /// One lane's eigensolver storage for `n x n` matrices.
+    type EigScratch: Send;
+
+    /// Size the lane scratch.
+    fn eig_scratch(n: usize, vectors: bool, par: faer::Par) -> Self::EigScratch;
+
+    /// Eigenvalues (and, when `vectors` is `Some`, column-major eigenvectors) of `mat`, pushed.
     fn eig_into(
         op: crate::Op,
         mat: faer::MatRef<'_, Self::Entity>,
-        values: &mut Vec<Self::Complex>,
-        vectors: &mut Vec<Self::Complex>,
-        par: crate::Parallel<'_>,
-    ) -> crate::Result<()>;
-
-    /// Eigenvalues of `mat`, pushed into the cleared output.
-    fn eig_values_into(
-        op: crate::Op,
-        mat: faer::MatRef<'_, Self::Entity>,
-        values: &mut Vec<Self::Complex>,
-        par: crate::Parallel<'_>,
+        values: &mut dyn crate::batch::Push<Self::Complex>,
+        vectors: Option<&mut dyn crate::batch::Push<Self::Complex>>,
+        scratch: &mut Self::EigScratch,
+        par: faer::Par,
     ) -> crate::Result<()>;
 }
 

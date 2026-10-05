@@ -2,11 +2,10 @@
 
 mod common;
 
+use common::single::{eig, eig_values, eigh, eigh_values};
 use common::*;
 use num_complex::{Complex32, Complex64};
 use strided_view::RawStridedRef;
-use tlinalg::eig::{eig, eig_values};
-use tlinalg::eigh::{eigh, eigh_values};
 use tlinalg::FaerScalar;
 use tlinalg::{Op, Parallel};
 

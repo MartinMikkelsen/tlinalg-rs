@@ -1,0 +1,106 @@
+# tlinalg batched API (torch-like) — decision 2026-10-05
+
+The maintainer's intent: the whole tlinalg (and tlinalg-blas) public API is **torch-like batched**.
+A host calls each family **once per batch**; the library owns the batch loop (and, for tlinalg, the
+batch-direction fan-out). Per-matrix entry points become crate-private helpers.
+
+## Shape of every entry point
+
+* Input: one `RawStridedRef<'_, T>` of rank `2 + B`, dims `[rows, cols, b_1, ..., b_B]`, arbitrary
+  (validated, non-negative) strides. Matrix dims first, batch dims after (tenferro's column-major
+  convention). `B = 0` is a single matrix. Batch iteration over arbitrary-rank strided batch dims is
+  the library's job (shared helper), so the host never packs a batch just to call us.
+* Outputs: compact column-major per item, items contiguous in batch order (item `i` occupies
+  `[i*item_len, (i+1)*item_len)`). Output `Vec`s are **cleared and then filled**; total length is
+  `item_len * batch`. No zero-fill pass: sequential paths push; parallel paths write into
+  `spare_capacity_mut()` per lane (disjoint `MaybeUninit` chunks) and `set_len` once after every lane
+  succeeded. On error the `Vec`s are left empty (cleared) — never partially initialised.
+* In-place / direct-output routes (solve into a host view, compact Householder data, packed LU) take
+  a batched `RawStridedMut` / compact `&mut [T]` covering the whole batch, and keep their existing
+  "unchanged on failure" guarantees per item where they had them.
+* Per-item scalar results (LU parity, RRQR permutation, …) are batch-length outputs too.
+
+## Parallelism (tlinalg only)
+
+* Arguments: `par: Parallel<'_>` (the call's pool + budget) and `plan: LanePlan<'_>` (host-resolved:
+  `lanes`, `item_parallel`). The **host** decides lanes (tenferro's `lane_plan`: batch policy,
+  forced strategies, thresholds, `can_fan_out_lanes`); tlinalg must not re-derive lanes.
+* `plan.lanes <= 1`: run all items in order with `plan.item_parallel`.
+* `plan.lanes > 1`: requires `par = Parallel::Pool`; install that pool, split the batch into
+  `chunk = batch.div_ceil(lanes)` contiguous chunks, run each chunk as a `rayon::scope` task with
+  `plan.item_parallel` for its items (normally `Sequential`, never nesting a second fan-out).
+  This replaces tenferro's `for_each_chunk`/`with_outer_lanes` for linalg.
+* Scratch is per lane and reused across the items of that lane (faer `MemBuffer` sized once for the
+  item shape; host `Workspace` where the family already uses it).
+* Errors: each lane stops at its own first failure and does **not** stop because another lane
+  failed; the returned error is the one from the lowest-indexed failing lane, i.e. the
+  lowest-indexed failing item — deterministic regardless of scheduling.
+
+## tlinalg-blas
+
+Same batched signatures, minus `par`/`plan` (LAPACK threading is vendor-owned): a sequential loop
+over the batch, with **one** workspace query + acquisition per batch call outside the loop, reused
+for every item (as `svd_batch` already does). Injected-symbol (`provider-inject`) support unchanged.
+
+## Scope
+
+Applies to every family, including the already-extracted SVD and packed LU (packed LU's chunk API
+becomes the batched API; its fan-out moves from tenferro into tlinalg).
+
+## Host (tenferro) keeps
+
+Lane decision, dtype/placement dispatch, tensor construction, QR gauges, RRQR rank decision,
+Householder append/from-factors/gemm, negative-stride rejection, error mapping.
+
+## Behaviour change to record
+
+Families other than packed LU previously looped sequentially over the batch in tenferro. With the
+host's existing `lane_plan`, Auto policy now fans them out over the batch too. This is intended
+(maintainer decision) and must be measured: tenferro-benchmark small-matrix batch cases.
+
+## Addendum: multiple batch axes (2026-10-05)
+
+* Keep `B >= 0` batch axes. One shared helper normalises them first: drop size-1 axes and
+  **coalesce mergeable adjacent axes** (`stride[i+1] == stride[i] * dim[i]`), so the common compact
+  case collapses to a single axis with a plain stride step — no per-item multi-index arithmetic.
+  Only genuinely non-mergeable views pay for the multi-index walk (an odometer, not div/mod per item).
+* Broadcasting: every operand of a call shares the **same batch dims**. The host expresses
+  torch-style batch broadcasting by giving an input a **stride of 0** on a batch axis
+  (e.g. one `A` against many `B` in solve/triangular_solve/lu_solve). Inputs may have stride-0
+  batch axes; the kernel needs no broadcasting logic of its own.
+* Mutable descriptors (in-place / direct output) must **not** self-overlap across batch items:
+  reject stride 0 on a batch axis of size > 1 and any overlapping item ranges with
+  `Error::InvalidArgument`. `RawStridedMut::new` only checks bounds, and parallel lanes writing an
+  aliased item would be a data race, so this check is a soundness requirement, not a nicety.
+  Overlap between a mutable output and an input is likewise rejected unless the family documents
+  in-place semantics.
+* Outputs created by the library (`Vec`s) are always compact with one flattened batch extent; the
+  host reshapes them to the batch shape it owns.
+
+## Implementation notes (tlinalg)
+
+Recorded with the implementation; they refine, not replace, the contract above.
+
+* **Shared driver.** `crates/tlinalg/src/batch.rs` is the only batch loop: descriptor validation
+  and batch-axis normalisation (`BatchedRef`, `BatchedMut`, `BatchAxes`), lane split and fan-out
+  (`run`), and output assembly (`Out` for library-created vectors, `InPlace` for host-owned compact
+  buffers).
+* **Lane parallelism.** With `plan.lanes > 1` every lane runs its items with
+  `Parallel::Sequential`, matching tenferro's outer-lane children (`with_outer_lanes` hands each
+  lane a sequential child context). `plan.item_parallel` applies to the single-lane case only. With
+  `lanes > 1` and `par = Parallel::Sequential` the chunks run one after another on the calling
+  thread, like `with_outer_lanes` on a context that cannot fan out.
+* **Item offsets.** After normalisation a compact batch has one axis and an item offset is one
+  multiply. A non-mergeable view decomposes the item index per item (`O(B)` integer work next to an
+  `O(n³)` kernel) instead of carrying an odometer: items are addressed by index from independent
+  lanes, so a per-item computation keeps them order-independent.
+* **Destination aliasing.** A mutable descriptor is rejected unless its whole layout (matrix and
+  batch axes) is injective under a sufficient test: after dropping extent-one axes and sorting by
+  absolute stride, every stride exceeds the span of the smaller axes. Input/output overlap cannot
+  be expressed: inputs borrow `&[T]` and destinations `&mut [T]`.
+* **Output assembly.** Library-created vectors are cleared, reserved, and their spare capacity is
+  split into disjoint per-lane `MaybeUninit` chunks written sequentially. `set_len` runs only after
+  every lane returned `Ok` with its chunk full; otherwise the vectors stay empty.
+* **Scratch.** faer work matrices and `MemBuffer`s are built once per lane and reused; buffers
+  whose prior contents faer could observe (decomposition outputs, QR block coefficients, the thin
+  `Q` seed) are reset per item to the state the pre-batching code allocated them in.

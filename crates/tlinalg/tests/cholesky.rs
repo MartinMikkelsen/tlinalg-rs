@@ -3,11 +3,12 @@
 
 mod common;
 
+use common::single::cholesky;
 use common::*;
 use num_complex::Complex64;
 use strided_view::RawStridedRef;
 use tlinalg::FaerScalar;
-use tlinalg::{cholesky::cholesky, Error, Op, Parallel};
+use tlinalg::{Error, Op, Parallel};
 
 fn reconstructs<T: TestScalar + FaerScalar>() {
     for n in [1, 3, 6] {
@@ -68,8 +69,8 @@ fn empty_and_failure<T: TestScalar + FaerScalar>() {
 
     let err = cholesky(
         Op::Cholesky,
-        3,
-        RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
+        2,
+        RawStridedRef::new(&a, &[2, 1], &[1, 2], 0).unwrap(),
         &mut l,
         Parallel::Sequential,
     )

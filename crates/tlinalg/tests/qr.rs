@@ -2,11 +2,11 @@
 
 mod common;
 
+use common::single::{apply_reflectors, compact_factor, qr, rank_revealing_qr};
 use common::*;
 use num_complex::Complex64;
 use strided_view::RawStridedRef;
-use tlinalg::householder::{apply_reflectors, compact_factor};
-use tlinalg::qr::{magnitude, qr, rank_revealing_qr};
+use tlinalg::qr::magnitude;
 use tlinalg::FaerScalar;
 use tlinalg::{Error, Op, Parallel};
 

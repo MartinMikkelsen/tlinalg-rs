@@ -1,14 +1,22 @@
 //! faer-backed, tensor-free linear-algebra kernels.
 //!
-//! This crate owns the per-item numerical kernels, their scratch, and the small vocabulary its
-//! callers use to drive them: borrowed strided I/O, [`Parallel`], [`LanePlan`], [`Workspace`] and
-//! the typed [`Error`]. It does not own tensors, allocation policy, dtype dispatch, placement, or the
-//! execution context; a host supplies borrowed operands, a [`Parallel`] token, a host-resolved
-//! [`LanePlan`], and (where a kernel needs pooled buffers) a [`Workspace`].
+//! This crate owns the numerical kernels, the batch loop over them, their scratch, and the small
+//! vocabulary its callers use to drive them: borrowed strided I/O, [`Parallel`], [`LanePlan`] and the
+//! typed [`Error`]. It does not own tensors, allocation policy, dtype dispatch, placement, or the
+//! execution context; a host supplies borrowed operands, output vectors, a [`Parallel`] token and a
+//! host-resolved [`LanePlan`]. Kernel scratch is native and per lane.
 //!
 //! The interface a host requires of its linear-algebra providers belongs to that host (tenferro
 //! defines it); this crate is one provider and defines only the types its own entry points take.
 //! The LAPACK provider (`tlinalg-blas`) is independent of this crate.
+//!
+//! # Batches
+//!
+//! Every entry point is batched (`docs/design/batched-api.md` in the repository): an input is a
+//! rank-`2 + B` [`strided_view::RawStridedRef`] `[rows, cols, b_1, ..., b_B]`, outputs are compact
+//! column-major items in batch order (first batch axis fastest), and the host's [`LanePlan`] decides
+//! how the batch is split across the [`Parallel`] pool. A failing call returns the error of its
+//! lowest-indexed failing item and leaves every library-created output vector empty.
 //!
 //! # Conventions
 //!
@@ -55,6 +63,7 @@ pub mod scratch;
 pub mod svd;
 pub mod triangular_solve;
 
+mod batch;
 mod scalar;
 mod util;
 
@@ -62,7 +71,7 @@ pub use error::{Error, NonFiniteRole, Op, Result};
 pub use lane::LanePlan;
 pub use parallel::Parallel;
 pub use scalar::FaerScalar;
-pub use scratch::{IndexWorkspace, Scalar, Workspace};
+pub use scratch::Scalar;
 
 mod sealed {
     /// Seals [`crate::Scalar`].
@@ -86,17 +95,6 @@ where
     match par {
         Parallel::Sequential => f(faer::Par::Seq),
         Parallel::Pool { pool, budget } => pool.install(|| f(faer::Par::rayon(budget.get()))),
-    }
-}
-
-/// The `faer::Par` a token denotes, for sizing work that does not run yet.
-///
-/// Scratch sizing depends on the thread count faer will use, so a caller that builds scratch
-/// before entering the pool needs the same mapping [`with_parallel`] applies.
-pub(crate) fn faer_par(par: Parallel<'_>) -> faer::Par {
-    match par {
-        Parallel::Sequential => faer::Par::Seq,
-        Parallel::Pool { budget, .. } => faer::Par::rayon(budget.get()),
     }
 }
 
