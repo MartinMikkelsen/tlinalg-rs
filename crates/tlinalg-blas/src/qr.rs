@@ -87,8 +87,9 @@ where
     }
     check_info(op, T::GEQRF, info)?;
     let factor_len = work_len(op, "QR workspace", T::work_query_len(query[0]))?;
-    // SAFETY: the first `m * k` entries hold `k` reflectors of an `m x k` matrix and `k <= m`;
-    // `lwork = -1` writes only the query slot.
+    // SAFETY: `packed` is `q_len = m * k` long and the leading dimensions match the validated
+    // shape; `lwork = -1` reads no matrix contents and writes only the query slot, so this query
+    // does not depend on `packed` holding the `?geqrf` reflectors the loop below fills.
     unsafe {
         T::orgqr(
             mi,

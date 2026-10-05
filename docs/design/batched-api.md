@@ -101,11 +101,16 @@ Recorded with the implementation; they refine, not replace, the contract above.
 * **No driver allocation.** Normalised batch axes are stored inline (up to 8 axes; heap only
   beyond). Lane views are derived from the lane index on demand, never collected into a list, and a
   multi-lane run records the lowest failing lane in a mutex instead of a per-lane result vector. On
-  one lane the driver allocates nothing; `tests/alloc_counts.rs` pins each family's remaining
-  per-call allocations (its faer lane scratch), which do not grow with the batch.
+  one lane the driver allocates nothing; `tests/alloc_counts.rs` pins the remaining per-call
+  allocations of compact Householder, Cholesky, QR, rank-revealing QR, LU solve, full-pivot LU
+  solve, eigh, SVD, packed LU and triangular solve (their faer lane scratch), which do not grow
+  with the batch. The families the table does not name are not pinned yet.
 * **Output assembly.** Library-created vectors are cleared, reserved, and their spare capacity is
   split into disjoint per-lane `MaybeUninit` chunks written sequentially. `set_len` runs only after
   every lane returned `Ok` with its chunk full; otherwise the vectors stay empty.
 * **Scratch.** faer work matrices and `MemBuffer`s are built once per lane and reused; buffers
   whose prior contents faer could observe (decomposition outputs, QR block coefficients, the thin
   `Q` seed) are reset per item to the state the pre-batching code allocated them in.
+* **Empty `full` SVD.** For a matrix with a zero dimension in `full` mode the two providers differ,
+  as they did before the extraction: faer emits the identity `U` and `Vᴴ` blocks while `tlinalg-blas`
+  returns empty factors and leaves those blocks to the host.

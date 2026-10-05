@@ -110,7 +110,8 @@ where
     };
     check_scratch(op, w.len(), n)?;
     check_scratch(op, wi.len(), if T::COMPLEX { 0 } else { n })?;
-    check_scratch(op, vl.len().min(query.len()), 1)?;
+    check_scratch(op, vl.len(), 1)?;
+    check_scratch(op, query.len(), 1)?;
     check_scratch(op, vr.len(), vector_len)?;
     check_scratch(op, rwork.len(), rwork_len)?;
 
@@ -174,15 +175,10 @@ where
             if let Some(vectors) = vectors.as_deref_mut() {
                 vectors.extend(vr.iter().map(|&value| value.to_complex()));
             }
+        } else if vectors.is_some() {
+            push_real_pairs::<T>(n, &w, &wi, Some(&vr[..]), values, vectors.as_deref_mut());
         } else {
-            push_real_pairs::<T>(
-                n,
-                &w,
-                &wi,
-                vectors.is_some().then_some(&vr[..]),
-                values,
-                vectors.as_deref_mut(),
-            );
+            push_real_values::<T>(&w, &wi, values);
         }
     }
     workspace.release(a_copy);
@@ -203,6 +199,21 @@ where
 }
 
 /// Assemble one real input's eigenvalues (and vectors) in the complex counterpart.
+/// Push the real and imaginary parts LAPACK returned, unfiltered.
+///
+/// [`push_real_pairs`] folds an eigenvalue whose imaginary part is within `epsilon *
+/// max(|re|, 1)` of zero, because its vector conversion has to decide whether a column is a real
+/// eigenvector or the first of a conjugate pair. A values-only call wants no such decision, and the
+/// faer provider reports the raw parts too, so this is what keeps the two providers — and each
+/// provider's pre-extraction output — identical.
+fn push_real_values<T: LapackScalar>(w: &[T], wi: &[T::Real], values: &mut Vec<T::Complex>) {
+    values.extend(
+        w.iter()
+            .zip(wi)
+            .map(|(value, imag)| T::complex_from_parts(value.real_part(), *imag)),
+    );
+}
+
 fn push_real_pairs<T: LapackScalar>(
     n: usize,
     w: &[T],
@@ -248,5 +259,28 @@ fn push_real_pairs<T: LapackScalar>(
             }
             col += 2;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{push_real_pairs, push_real_values};
+    use num_complex::Complex64;
+
+    /// A real matrix whose eigenvalues have a tiny imaginary part must report what LAPACK returned:
+    /// the pair folding `push_real_pairs` needs for its vectors would report these as real.
+    #[test]
+    fn values_only_keeps_a_tiny_imaginary_part() {
+        let (w, wi) = ([1.0_f64, 1.0], [1.0e-18_f64, -1.0e-18]);
+        let mut raw = Vec::new();
+        push_real_values::<f64>(&w, &wi, &mut raw);
+        assert_eq!(
+            raw,
+            vec![Complex64::new(1.0, 1.0e-18), Complex64::new(1.0, -1.0e-18)]
+        );
+
+        let mut folded = Vec::new();
+        push_real_pairs::<f64>(2, &w, &wi, None, &mut folded, None);
+        assert_eq!(folded, vec![Complex64::new(1.0, 0.0); 2]);
     }
 }

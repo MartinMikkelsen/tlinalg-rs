@@ -33,14 +33,48 @@ fn head_one<T: FaerScalar>() -> T::Entity {
     T::entity_from_real(T::parity(false).real_part())
 }
 
+/// One lane's storage for [`compact_factor`]: the reflector basis and its `tau`, plus the faer
+/// scratch, sized once for the widest reflector the lane's matrices have and reused by every one.
+struct CompactFactorScratch<E: faer::traits::ComplexField> {
+    basis: Mat<E>,
+    factor: Mat<E>,
+    mem: MemBuffer,
+}
+
+impl<E: faer::traits::ComplexField> CompactFactorScratch<E> {
+    /// Size the storage for every reflector of a `rows x cols` matrix.
+    ///
+    /// Reflector `j` applies a `(rows - j) x 1` block to `cols - j - 1` columns, and faer's
+    /// workspace request is `1 * (cols - j - 1)`, so the first reflector's shapes bound every later
+    /// one.
+    fn new(rows: usize, cols: usize, _par: faer::Par) -> Self {
+        let (basis_rows, targets) = if rows.min(cols) == 0 {
+            (0, 0)
+        } else {
+            (rows, cols - 1)
+        };
+        Self {
+            basis: Mat::zeros(basis_rows, 1),
+            factor: Mat::zeros(1, 1),
+            mem: MemBuffer::new(
+                faer::linalg::householder::apply_block_householder_on_the_left_in_place_scratch::<E>(
+                    basis_rows, 1, targets,
+                ),
+            ),
+        }
+    }
+}
+
 /// Factor one compact `rows x cols` matrix in place, pushing its coefficients.
 fn compact_factor_item<T: FaerScalar>(
     data: &mut [T],
     rows: usize,
     cols: usize,
     coeff: &mut impl Push<T>,
+    scratch: &mut CompactFactorScratch<T::Entity>,
     par: faer::Par,
 ) {
+    let CompactFactorScratch { basis, factor, mem } = scratch;
     let k = rows.min(cols);
     let mut qr = MatMut::from_column_major_slice_mut(T::entity_slice_mut(data), rows, cols);
     for j in 0..k {
@@ -52,24 +86,21 @@ fn compact_factor_item<T: FaerScalar>(
         // Faer stores H = I - vv^H/tau; compact state stores 1/tau.
         coeff.push(T::from_real(T::recip_real(info.tau)));
         if j + 1 < cols {
-            let mut basis = Mat::<T::Entity>::zeros(rows - j, 1);
+            let basis_rows = rows - j;
+            let mut basis = basis.as_mut().subrows_mut(0, basis_rows);
             basis[(0, 0)] = head_one::<T>();
-            for row in 1..rows - j {
+            for row in 1..basis_rows {
                 basis[(row, 0)] = qr[(j + row, j)];
             }
-            let factor = Mat::from_fn(1, 1, |_, _| T::entity_from_real(info.tau));
-            let mut mem = MemBuffer::new(
-                faer::linalg::householder::apply_block_householder_on_the_left_in_place_scratch::<
-                    T::Entity,
-                >(rows - j, 1, cols - j - 1),
-            );
+            factor[(0, 0)] = T::entity_from_real(info.tau);
             faer::linalg::householder::apply_block_householder_on_the_left_in_place_with_conj(
                 basis.as_ref(),
                 factor.as_ref(),
                 Conj::No,
-                qr.rb_mut().submatrix_mut(j, j + 1, rows - j, cols - j - 1),
+                qr.rb_mut()
+                    .submatrix_mut(j, j + 1, basis_rows, cols - j - 1),
                 par,
-                MemStack::new(&mut mem),
+                MemStack::new(mem),
             );
         }
         qr[(j, j)] = beta;
@@ -113,6 +144,7 @@ pub fn compact_factor<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    coeff.clear();
     let matrix_len = checked_product(op, "matrix", &[rows, cols])?;
     batch::run(
         op,
@@ -123,9 +155,9 @@ pub fn compact_factor<T: FaerScalar>(
             in_place(data, matrix_len, "matrix"),
             out(coeff, rows.min(cols)),
         ),
-        |_| (),
-        |index, (data, coeff), (), par| {
-            compact_factor_item::<T>(data.item(index), rows, cols, coeff, par);
+        |par| CompactFactorScratch::<T::Entity>::new(rows, cols, par),
+        |index, (data, coeff), scratch, par| {
+            compact_factor_item::<T>(data.item(index), rows, cols, coeff, scratch, par);
             Ok(())
         },
     )

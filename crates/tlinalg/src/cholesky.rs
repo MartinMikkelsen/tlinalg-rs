@@ -71,6 +71,7 @@ pub fn cholesky<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    l.clear();
     let input = BatchedRef::square(op, "input", input)?;
     let n = input.rows();
     let l_len = checked_product(op, "L", &[n, n])?;

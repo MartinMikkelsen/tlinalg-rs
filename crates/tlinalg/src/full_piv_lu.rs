@@ -144,10 +144,15 @@ pub fn full_piv_lu<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    let FullPivLuFactors { p, l, u, q, parity } = factors;
+    p.clear();
+    l.clear();
+    u.clear();
+    q.clear();
+    parity.clear();
     let input = BatchedRef::square(op, "input", input)?;
     let n = input.rows();
     let len = checked_product(op, "matrix", &[n, n])?;
-    let FullPivLuFactors { p, l, u, q, parity } = factors;
     batch::run(
         op,
         input.batch(),
@@ -272,6 +277,7 @@ pub fn full_piv_lu_solve<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    x.clear();
     let a = BatchedRef::square(op, "A", a)?;
     let b = BatchedRef::new(op, "B", b)?;
     let n = a.rows();

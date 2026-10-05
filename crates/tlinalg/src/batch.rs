@@ -231,12 +231,11 @@ impl<'a, T: ScalarEntity> BatchedRef<'a, T> {
         // `dims`/`strides` lies inside the borrowed data, for the borrow `'a`. Batch item `index`
         // (below the batch count) is the sub-rectangle at the batch offset computed above, so every
         // element faer reads is one of those validated offsets. `wrapping_offset` keeps the
-        // pointer's provenance; for an empty matrix `ptr()` is dangling and aligned, and faer never
-        // dereferences a matrix with a zero dimension. The cast is the layout-preserving one
-        // asserted in `crate::scalar`.
+        // pointer's provenance; see `item_ptr` for the empty case. The cast is the layout-preserving
+        // one asserted in `crate::scalar`.
         unsafe {
             MatRef::from_raw_parts(
-                self.input.ptr().wrapping_offset(offset).cast::<T::Entity>(),
+                item_ptr(self.input.ptr(), offset, self.rows, self.cols).cast::<T::Entity>(),
                 self.rows,
                 self.cols,
                 strides[0],
@@ -261,6 +260,23 @@ pub(crate) fn same_batch(
         ));
     }
     Ok(())
+}
+
+/// The pointer faer receives for one batch item.
+///
+/// An item with a zero dimension has no elements, so its batch offset carries no meaning and is not
+/// applied. `strided-view` accepts an empty layout without validating offsets and then hands back
+/// its `dangling()` pointer, which is aligned but names no allocation: adding a large or negative
+/// batch stride to it can wrap it to null, and faer stores the pointer it is given in a `NonNull`
+/// built with `new_unchecked` (`faer::MatRef::from_raw_parts`). The descriptor's own pointer is
+/// non-null and aligned, so an empty item keeps it and nothing is dereferenced either way.
+#[inline]
+fn item_ptr<T>(base: *const T, offset: isize, rows: usize, cols: usize) -> *const T {
+    if rows == 0 || cols == 0 {
+        base
+    } else {
+        base.wrapping_offset(offset)
+    }
 }
 
 /// Whether a strided layout maps distinct indices to distinct offsets.
@@ -381,10 +397,12 @@ impl<'a, T: ScalarEntity> BatchedMut<'a, T> {
         // SAFETY: `RawStridedMut::new` validated every reachable offset against the exclusively
         // borrowed data; item `index` is a sub-rectangle of those offsets, and the injective layout
         // (checked in `new`) makes it disjoint from every other item. The caller guarantees no other
-        // reference covers it. Empty matrices are never dereferenced; see `BatchedRef::item`.
+        // reference covers it. See `item_ptr` for the empty case.
         unsafe {
             MatMut::from_raw_parts_mut(
-                self.base.0.wrapping_offset(offset).cast::<T::Entity>(),
+                item_ptr(self.base.0, offset, self.dims[0], self.dims[1])
+                    .cast_mut()
+                    .cast::<T::Entity>(),
                 self.dims[0],
                 self.dims[1],
                 self.strides[0],
@@ -427,18 +445,14 @@ impl<U> Sink<'_, U> {
     }
 }
 
-/// Something a per-item kernel can append output elements to: a `Vec` or a lane [`Sink`].
+/// Something a per-item kernel can append output elements to, the lane it writes into.
 ///
-/// `pub` only so the crate-internal `EigScalar` can name it; this module is private.
+/// A trait rather than the concrete [`Sink`] so `EigScalar::eig_into` can take a `&mut dyn Push` and
+/// erase the lane's lifetime. `pub` only so the crate-internal `EigScalar` can name it; this module
+/// is private.
 pub trait Push<U> {
     /// Append one element.
     fn push(&mut self, value: U);
-}
-
-impl<U> Push<U> for Vec<U> {
-    fn push(&mut self, value: U) {
-        Vec::push(self, value);
-    }
 }
 
 impl<U> Push<U> for Sink<'_, U> {
@@ -782,7 +796,18 @@ where
                     }
                 }
                 Parallel::Sequential => {
-                    (0..lanes).try_for_each(|lane| run_lane(lane, Parallel::Sequential))
+                    // Every lane still runs, like the pool path; the first lane to fail reports and
+                    // the rest are not skipped, so a lane never stops because another one failed.
+                    let mut first: Option<Error> = None;
+                    for lane in 0..lanes {
+                        if let Err(error) = run_lane(lane, Parallel::Sequential) {
+                            first.get_or_insert(error);
+                        }
+                    }
+                    match first {
+                        Some(error) => Err(error),
+                        None => Ok(()),
+                    }
                 }
             }
         }
@@ -798,9 +823,50 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{is_injective, out, run, BatchAxes};
+    use super::{is_injective, out, run, BatchAxes, BatchedMut, BatchedRef};
     use crate::{Error, LanePlan, Op, Parallel};
     use core::num::NonZeroUsize;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use strided_view::{RawStridedMut, RawStridedRef};
+
+    /// A failing lane must not stop the later ones on the no-pool fallback either: the driver only
+    /// ever reports the first failure, but every lane still runs.
+    #[test]
+    fn a_failing_lane_does_not_stop_the_later_ones() {
+        let ran = AtomicUsize::new(0);
+        let mut values: Vec<usize> = Vec::new();
+        let err = run(
+            Op::Svd,
+            6,
+            Parallel::Sequential,
+            LanePlan {
+                lanes: 3,
+                item_parallel: Parallel::Sequential,
+            },
+            &mut (out(&mut values, 1),),
+            |_| (),
+            |index, (_,), (), _| {
+                if index == 1 {
+                    return Err(Error::Inconsistent {
+                        op: Op::Svd,
+                        detail: "one",
+                    });
+                }
+                ran.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            Error::Inconsistent {
+                op: Op::Svd,
+                detail: "one"
+            }
+        );
+        // Items 0 and 2..5; the failing item 1 is not counted.
+        assert_eq!(ran.load(Ordering::Relaxed), 5);
+    }
 
     /// Items 2 and 5 fail with distinguishable errors; whatever the scheduling, the error of the
     /// lowest-indexed failing item is returned and the output stays empty.
@@ -870,6 +936,41 @@ mod tests {
         );
         assert!(matches!(err, Err(Error::Inconsistent { .. })));
         assert!(values.is_empty());
+    }
+
+    /// `strided-view` skips offset validation for an empty layout and then returns its `dangling()`
+    /// pointer, so an item that applied its batch offset could wrap that pointer to null. faer turns
+    /// the pointer it is handed into a `NonNull`, so a null is not an accepted input.
+    #[test]
+    fn an_empty_item_keeps_a_non_null_pointer() {
+        let empty: [f64; 0] = [];
+        let dims = [0usize, 0, 2];
+        // `wrapping_offset` counts elements, so a batch stride of `-1` is accepted for the empty
+        // layout and wraps the dangling pointer of address `align_of::<f64>() == 8` to null.
+        let strides = [1isize, 0, -1];
+        let view = RawStridedRef::new(&empty, &dims, &strides, 0).unwrap();
+        let batched = BatchedRef::new(Op::Svd, "input", view).unwrap();
+        assert_eq!(batched.batch(), 2);
+        for index in 0..batched.batch() {
+            let matrix = batched.item(index);
+            assert!(!matrix.as_ptr().is_null(), "item {index}");
+            assert_eq!(matrix.as_ptr() as usize % core::mem::align_of::<f64>(), 0);
+        }
+    }
+
+    #[test]
+    fn an_empty_mutable_item_keeps_a_non_null_pointer() {
+        let mut empty: [f64; 0] = [];
+        let dims = [0usize, 0, 2];
+        let strides = [1isize, 0, -1];
+        let mut view = RawStridedMut::new(&mut empty, &dims, &strides, 0).unwrap();
+        let batched = BatchedMut::new(Op::Svd, "output", &mut view).unwrap();
+        assert_eq!(batched.batch, 2);
+        for index in 0..batched.batch {
+            // SAFETY: every item is visited once and its matrix is dropped before the next.
+            let matrix = unsafe { batched.item(index) };
+            assert!(!matrix.as_ptr().is_null(), "item {index}");
+        }
     }
 
     #[test]

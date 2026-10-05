@@ -227,6 +227,8 @@ pub fn qr<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    q.clear();
+    r.clear();
     let input = BatchedRef::new(op, "input", input)?;
     let (m, n) = (input.rows(), input.cols());
     let k = m.min(n);
@@ -301,6 +303,9 @@ pub fn rank_revealing_qr<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    q.clear();
+    r.clear();
+    permutation.clear();
     let input = BatchedRef::new(op, "input", input)?;
     let (m, n) = (input.rows(), input.cols());
     let k = m.min(n);

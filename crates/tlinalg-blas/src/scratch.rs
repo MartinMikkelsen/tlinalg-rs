@@ -5,7 +5,10 @@
 //!
 //! Implementations obtain every reusable buffer through [`Workspace`]. The host implements it over
 //! its own pool, so the pool's identity, retention policy and steady-state allocation behaviour are
-//! preserved and no second allocator is introduced.
+//! preserved and no second allocator is introduced. Rank-revealing QR is the one family whose
+//! short-lived working buffers — `tau`, `jpvt` and its per-item permutation check — are allocated
+//! per call rather than pooled; `tests/alloc_counts.rs` pins that count so it cannot grow with the
+//! batch.
 //!
 //! # Ownership
 //!

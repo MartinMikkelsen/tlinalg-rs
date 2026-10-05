@@ -28,7 +28,7 @@ fn batch_of(n: usize, batch: usize) -> Vec<f64> {
 }
 
 /// Steady-state allocations per call of each family, one sequential lane, `n = 6`.
-fn family_counts(batch: usize) -> [(&'static str, usize); 10] {
+fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
     let n = 6;
     let a = batch_of(n, batch);
     let (dims, strides) = ([n, n, batch], [1, n as isize, (n * n) as isize]);
@@ -105,7 +105,23 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 10] {
         )
         .unwrap();
     });
+    let (mut state, mut coeff) = (a.clone(), Vec::with_capacity(n * batch));
+    let compact_factor = steady(|| {
+        state.copy_from_slice(&a);
+        tlinalg::householder::compact_factor(
+            Op::HouseholderQr,
+            n,
+            n,
+            batch,
+            &mut state,
+            &mut coeff,
+            seq,
+            plan,
+        )
+        .unwrap();
+    });
     [
+        ("compact_factor", compact_factor),
         ("cholesky", cholesky),
         ("rank_revealing_qr", rrqr),
         ("solve", solve),
@@ -169,6 +185,7 @@ fn per_call_allocations_do_not_grow_with_the_batch() {
     // Each count is at most the pre-extraction route's native allocations for the same call
     // (rank_revealing_qr was 7, solve 5, full_piv_lu_solve 7).
     let expected = [
+        ("compact_factor", 3),
         ("cholesky", 2),
         ("rank_revealing_qr", 6),
         ("solve", 5),

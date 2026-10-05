@@ -137,13 +137,17 @@ pub fn lu<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    let LuFactors { p, l, u, parity } = factors;
+    p.clear();
+    l.clear();
+    u.clear();
+    parity.clear();
     let input = BatchedRef::new(op, "input", input)?;
     let (m, n) = (input.rows(), input.cols());
     let k = m.min(n);
     let p_len = checked_product(op, "permutation matrix", &[m, m])?;
     let l_len = checked_product(op, "L", &[m, k])?;
     let u_len = checked_product(op, "U", &[k, n])?;
-    let LuFactors { p, l, u, parity } = factors;
     batch::run(
         op,
         input.batch(),

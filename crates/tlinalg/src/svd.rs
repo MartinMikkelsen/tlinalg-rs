@@ -183,6 +183,7 @@ pub fn svd_values<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    s.clear();
     let input = BatchedRef::new(op, "input", input)?;
     let (m, n) = (input.rows(), input.cols());
     batch::run(
@@ -234,6 +235,9 @@ pub fn svd<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    u.clear();
+    s.clear();
+    vt.clear();
     let input = BatchedRef::new(op, "input", input)?;
     let (m, n) = (input.rows(), input.cols());
     let k = m.min(n);

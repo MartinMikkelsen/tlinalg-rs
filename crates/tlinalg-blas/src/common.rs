@@ -27,7 +27,7 @@ pub(crate) fn dim_i32(op: Op, value: usize) -> Result<i32> {
 }
 
 /// Translate a LAPACK `info`: negative is an illegal argument, positive a numerical failure.
-pub(crate) fn check_info(op: Op, routine: &'static str, info: i32) -> Result<()> {
+pub(crate) fn check_info(op: Op, routine: &str, info: i32) -> Result<()> {
     if info < 0 {
         return Err(Error::InvalidArgument {
             op,
@@ -43,20 +43,11 @@ pub(crate) fn check_info(op: Op, routine: &'static str, info: i32) -> Result<()>
 
 /// [`check_info`] for a workspace query: the routine is reported as `"<routine>(work query)"`.
 pub(crate) fn check_query_info(op: Op, routine: &'static str, info: i32) -> Result<()> {
-    if info < 0 {
-        return Err(Error::InvalidArgument {
-            op,
-            role: "lapack_argument",
-            detail: format!(
-                "LAPACK {routine}(work query) argument {} had an illegal value",
-                -info
-            ),
-        });
+    if info == 0 {
+        // A query runs on every call, so the name is only composed when it is reported.
+        return Ok(());
     }
-    if info > 0 {
-        return Err(Error::NonConvergence { op });
-    }
-    Ok(())
+    check_info(op, &format!("{routine}(work query)"), info)
 }
 
 /// The `lwork` a workspace query reported, as an `i32`.

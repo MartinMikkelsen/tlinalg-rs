@@ -17,7 +17,7 @@ use strided_view::RawStridedRef;
 use tlinalg_blas::cholesky::cholesky;
 use tlinalg_blas::eigh::eigh;
 use tlinalg_blas::lu::lu_factor;
-use tlinalg_blas::qr::qr;
+use tlinalg_blas::qr::{qr, rank_revealing_qr, RankRevealingQrOutputs};
 use tlinalg_blas::solve::solve;
 use tlinalg_blas::svd::{svd, SvdMode, SvdOutputs};
 use tlinalg_blas::triangular_solve::{triangular_solve, TriangularSolveOptions};
@@ -140,6 +140,20 @@ fn row(name: &str, count: usize) -> usize {
         }),
         "solve" => measure(|| solve(Op::Solve, false, a, b, &mut o1, &mut ws).unwrap()),
         "qr" => measure(|| qr(Op::Qr, a, &mut o1, &mut o2, &mut ws).unwrap()),
+        "rank_revealing_qr" => {
+            // This family allocates its own `tau`, `jpvt`, per-item permutation check and
+            // `?geqp3`/`?orgqr` scratch instead of acquiring them from the host workspace; the
+            // count is pinned here so a regression shows up. See `tlinalg-blas/src/scratch.rs`.
+            let mut permutation = Vec::with_capacity(N * count);
+            measure(|| {
+                let outputs = RankRevealingQrOutputs {
+                    q: &mut o1,
+                    r: &mut o2,
+                    permutation: &mut permutation,
+                };
+                rank_revealing_qr(Op::RankRevealingQr, a, outputs, &mut ws).unwrap()
+            })
+        }
         "eigh" => measure(|| eigh(Op::Eigh, a, &mut o1, Some(&mut o2), &mut ws).unwrap()),
         "svd" => measure(|| {
             let outputs = SvdOutputs {
@@ -172,6 +186,7 @@ fn steady_state_allocations_do_not_grow_with_the_batch() {
         ("triangular_solve", 0),
         ("solve", 2),
         ("qr", 0),
+        ("rank_revealing_qr", 3),
         ("eigh", 0),
         ("svd", 0),
         ("lu_factor", 0),

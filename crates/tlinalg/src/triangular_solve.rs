@@ -146,6 +146,7 @@ pub fn triangular_solve<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    x.clear();
     let a = BatchedRef::square(op, "A", a)?;
     let b = BatchedRef::new(op, "B", b)?;
     same_batch(op, "B", a.batch_dims(), b.batch_dims())?;

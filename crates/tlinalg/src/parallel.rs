@@ -17,10 +17,14 @@ use rayon::ThreadPool;
 ///
 /// # Budget contract
 ///
-/// `budget` is an upper bound the **implementation** must honour. Selecting the pool does not
-/// impose it: `ThreadPool::install` runs work on that pool, and the pool may be larger than
-/// `budget`. An implementation that fans out must bound its own fan-out to `budget` threads (a
-/// count-based provider policy already does so).
+/// `budget` is an upper bound the **implementation** must honour for the parallelism it starts
+/// itself. Selecting the pool does not impose it: `ThreadPool::install` runs work on that pool, and
+/// the pool may be larger than `budget`. Work the implementation fans out over — over the items of
+/// one chunk, say — must fit in `budget` threads (a count-based provider policy already does so).
+///
+/// The batch's outer fan-out is not the implementation's to bound or to re-derive: it is the number
+/// of tasks the host asked for in [`crate::LanePlan`], which the host resolves from this same
+/// budget. A batched entry point runs exactly that many tasks.
 ///
 /// # Example
 ///

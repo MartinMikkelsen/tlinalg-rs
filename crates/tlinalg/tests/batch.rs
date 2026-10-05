@@ -639,6 +639,68 @@ fn householder_lanes_match() {
     assert_eq!(sequential.1.len(), batch * cols);
 }
 
+/// An argument the entry point rejects before the driver runs must still leave every library-created
+/// output empty, so a host recycling a pooled buffer never reads a previous call's values.
+#[test]
+fn a_rejected_argument_still_empties_the_outputs() {
+    let (par, plan) = (Parallel::Sequential, LanePlan::sequential());
+
+    // `cholesky` requires a square input.
+    let a = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let view = || RawStridedRef::new(&a, &[2, 3], &[1, 2], 0).unwrap();
+    let mut l = vec![7.0; 4];
+    assert!(tlinalg::cholesky::cholesky(Op::Cholesky, view(), &mut l, par, plan).is_err());
+    assert!(l.is_empty(), "cholesky");
+
+    // The same rejection must clear every output of a multi-output family at once.
+    let (mut values, mut vectors) = (vec![7.0; 4], vec![7.0; 4]);
+    assert!(tlinalg::eigh::eigh(Op::Eigh, view(), &mut values, &mut vectors, par, plan).is_err());
+    assert!(values.is_empty() && vectors.is_empty(), "eigh");
+
+    // A batch-shape mismatch is checked before the driver too.
+    let a2 = [4.0_f64, 0.0, 0.0, 4.0];
+    let b = [1.0_f64, 1.0, 1.0, 1.0];
+    let mut x = vec![7.0; 4];
+    assert!(
+        triangular_solve(
+            Op::TriangularSolve,
+            RawStridedRef::new(&a2, &[2, 2, 1], &[1, 2, 0], 0).unwrap(),
+            RawStridedRef::new(&b, &[2, 1, 2], &[1, 2, 0], 0).unwrap(),
+            TriangularSolveFlags {
+                left_side: true,
+                lower: true,
+                transpose_a: false,
+                unit_diagonal: false,
+            },
+            &mut x,
+            par,
+            plan,
+        )
+        .is_err(),
+        "triangular_solve"
+    );
+    assert!(x.is_empty(), "triangular_solve");
+
+    // A caller-owned buffer of the wrong length fails while the outputs are being prepared.
+    let mut state: Vec<f64> = Vec::new();
+    let mut coeff = vec![7.0; 2];
+    assert!(
+        tlinalg::householder::compact_factor(
+            Op::HouseholderQr,
+            2,
+            1,
+            1,
+            &mut state,
+            &mut coeff,
+            par,
+            plan,
+        )
+        .is_err(),
+        "compact_factor"
+    );
+    assert!(coeff.is_empty(), "compact_factor");
+}
+
 #[test]
 fn rank_below_two_is_rejected() {
     let a = [1.0_f64; 3];

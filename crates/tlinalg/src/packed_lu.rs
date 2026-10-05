@@ -29,35 +29,8 @@ use faer::{Conj, MatMut, MatRef};
 use strided_view::RawStridedRef;
 
 use crate::batch::{self, in_place, same_batch, BatchAxes, BatchedRef};
+use crate::util::{checked_product, invalid};
 use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
-
-/// A caller-supplied argument was invalid.
-fn invalid(op: Op, role: &'static str, detail: impl Into<String>) -> Error {
-    Error::InvalidArgument {
-        op,
-        role,
-        detail: detail.into(),
-    }
-}
-
-/// A shape product overflowed `usize`.
-fn checked_product(op: Op, role: &'static str, shape: &[usize]) -> Result<usize> {
-    shape
-        .iter()
-        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| {
-            invalid(
-                op,
-                "configuration",
-                format!("{role} element count overflows usize"),
-            )
-        })
-}
-
-/// `A` is exactly singular and the caller asked for a solve.
-fn singular(op: Op) -> Error {
-    Error::Singular { op }
-}
 
 /// Reusable per-lane state for factoring a run of `m x n` matrices.
 ///
@@ -530,7 +503,7 @@ pub fn factor_solve<T: FaerScalar>(
             }
             if rhs_len > 0 {
                 if (0..n).any(|i| matrix[i + i * n] == zero) {
-                    return Err(singular(op));
+                    return Err(Error::Singular { op });
                 }
                 let lu = MatRef::from_column_major_slice(T::entity_slice(matrix), n, n);
                 solve_one::<T>(par, (n, nrhs), lu, ipiv, output.item(index), (false, false));

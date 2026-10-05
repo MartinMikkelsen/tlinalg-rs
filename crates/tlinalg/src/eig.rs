@@ -61,6 +61,8 @@ pub fn eig<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    values.clear();
+    vectors.clear();
     let input = BatchedRef::square(op, "input", input)?;
     let n = input.rows();
     let v_len = checked_product(op, "eigenvector matrix", &[n, n])?;
@@ -113,6 +115,7 @@ pub fn eig_values<T: FaerScalar>(
     par: Parallel<'_>,
     plan: LanePlan<'_>,
 ) -> Result<()> {
+    values.clear();
     let input = BatchedRef::square(op, "input", input)?;
     let n = input.rows();
     batch::run(
