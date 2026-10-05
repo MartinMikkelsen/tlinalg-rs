@@ -32,7 +32,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -j 16 --workspace --all-targets -- -D warnings
-      - run: cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas -- -D warnings
+      - run: cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas,tlinalg-bench/link-openblas -- -D warnings
 
   # The LAPACK kernels need linked symbols. `link-openblas` builds OpenBLAS from source through
   # `openblas-src`, so no system package is required.

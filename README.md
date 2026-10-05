@@ -14,6 +14,7 @@ placement, execution context and error wrapping.
 | `tlinalg-blas` | The LAPACK/BLAS provider: vendor calls and their argument marshalling, a serial batch loop, vendor-owned threading. |
 | `tlinalg-testkit` | Dev-only, unpublished: provider-neutral test helpers (scalar test trait, generators, reference arithmetic, batched layouts, counting allocator). |
 | `tlinalg-parity` | Dev-only, unpublished: the same batched cases through both providers, compared gauge-aware. |
+| `tlinalg-bench` | Unpublished: Criterion benchmarks of each provider's kernels, faer vs LAPACK. |
 
 The two providers are siblings: neither depends on the other, and each owns its own vocabulary.
 The dev-only crates depend on the providers, never the other way round (`tlinalg-testkit` is only
@@ -56,7 +57,7 @@ interface and the package names settle.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas -- -D warnings
+cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas,tlinalg-bench/link-openblas -- -D warnings
 cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas
 cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas
 ```
@@ -78,6 +79,39 @@ coefficient for the binary families. What is unique is compared directly (singul
 eigenvalues as a multiset, Cholesky factors, solutions, permutation-convention LU factors, QR factors
 after fixing the `R` diagonal phase); the rest is checked by reconstruction against each
 provider's documented convention.
+
+## Benchmarks
+
+`tlinalg-bench` measures the providers' batched entry points directly, as a host calls them after
+resolving its lane plan: compact inputs, output vectors reused across iterations, and a recycling
+LAPACK workspace, so steady-state allocation is not what is timed.
+
+```sh
+# Everything (faer rows only without the feature):
+OPENBLAS_NUM_THREADS=1 cargo bench -p tlinalg-bench --features link-openblas
+# One family or case (Criterion filter on "family/dtype/row/case"):
+OPENBLAS_NUM_THREADS=1 cargo bench -p tlinalg-bench --features link-openblas -- '^eigh/f64/.*/n4xb1024$'
+```
+
+Groups are `family/dtype` (`f64` everywhere, `c64` for a representative subset); cases are
+`n{n}xb{batch}` (`n x n` matrices, `batch` of them: `n = 2, 4, 8` with `batch = 1, 3, 4, 8, 1024`,
+and `n = 32, 128, 512` single matrices) and `t64x24` (a tall matrix, SVD and QR). Each case has up
+to three rows:
+
+* `faer-1lane` — one sequential lane: per-item cost plus the batch loop, no threading.
+* `faer-{N}t` — the plan a host resolves on an `N`-worker pool (`TLINALG_BENCH_THREADS`, default
+  the available parallelism): `min(N, batch)` lanes over a batch, or a single matrix given the
+  whole pool for faer's internal parallelism.
+* `lapack` — `tlinalg-blas` (with `--features link-openblas`): a serial batch loop, vendor-owned
+  threading.
+
+Read `faer-1lane` against `lapack` with `OPENBLAS_NUM_THREADS=1` for a like-for-like kernel
+comparison; with OpenBLAS's default thread count, small LAPACK calls pay its threading overhead,
+which says more about the vendor configuration than the kernel. `faer-{N}t` against `faer-1lane`
+shows what lane fan-out buys for a batch and what intra-item parallelism costs or buys for one
+matrix. These are kernel numbers only: tensor construction, dtype dispatch, session entry and pool
+checkout belong to tenferro, and route-level performance (including the lane policy tenferro
+chooses) lives in [`tenferro-benchmark`](https://github.com/tensor4all/tenferro-benchmark).
 
 ## License
 

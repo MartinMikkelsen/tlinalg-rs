@@ -17,8 +17,10 @@ the shared rules were unavailable.
 * The interface a host requires of its linear-algebra providers belongs to the host (tenferro
   defines it and adapts each provider to it). Do not reintroduce a shared trait crate here, and do
   not shape these types for another provider: the sibling crate `tlinalg-blas` never depends on
-  `tlinalg`, nor `tlinalg` on it. Shared test helpers go in a dev-only, unpublished crate, never in
-  either provider.
+  `tlinalg`, nor `tlinalg` on it. Shared test helpers go in the dev-only, unpublished
+  `tlinalg-testkit` (only ever a `[dev-dependencies]` entry of a provider), never in either
+  provider; cross-provider checks go in `tlinalg-parity`, kernel benchmarks in `tlinalg-bench`. A
+  parity failure is a bug in a provider or in a documented convention, not a tolerance to loosen.
 * The public types are published behaviour: changing `Parallel`, `LanePlan`, `Error`, or the
   batched contract in `docs/design/batched-api.md` is a contract change and needs the design
   reviewed first.

@@ -1,0 +1,33 @@
+[package]
+name = "tlinalg-bench"
+description = "Kernel-level Criterion benchmarks comparing the tlinalg (faer) and tlinalg-blas (LAPACK) providers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+# Link OpenBLAS and add the LAPACK provider's rows. Without it only the faer rows run.
+link-openblas = ["tlinalg-blas/link-openblas"]
+
+[dependencies]
+tlinalg = { workspace = true }
+tlinalg-blas = { workspace = true }
+tlinalg-testkit = { workspace = true }
+num-complex = { workspace = true }
+rayon = { workspace = true }
+strided-view = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "kernels"
+harness = false
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@ members = [
     "crates/tlinalg-blas",
     "crates/tlinalg-testkit",
     "crates/tlinalg-parity",
+    "crates/tlinalg-bench",
 ]
 resolver = "2"
 
@@ -32,6 +33,8 @@ lapack = "0.20"
 cblas-sys = "0.1"
 blas-src = { version = "0.14", default-features = false }
 lapack-src = "0.13"
+# Benchmarks only.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
