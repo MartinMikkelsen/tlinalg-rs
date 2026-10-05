@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/tlinalg-traits", "crates/tlinalg"]
+members = [
+    "crates/tlinalg",
+    "crates/tlinalg-blas",
+    "crates/tlinalg-testkit",
+    "crates/tlinalg-parity",
+    "crates/tlinalg-bench",
+]
 resolver = "2"
 
 [workspace.package]
@@ -12,8 +18,9 @@ repository = "https://github.com/tensor4all/tlinalg-rs"
 publish = false
 
 [workspace.dependencies]
-tlinalg-traits = { version = "0.1.0", path = "crates/tlinalg-traits" }
 tlinalg = { version = "0.1.0", path = "crates/tlinalg" }
+tlinalg-blas = { version = "0.1.0", path = "crates/tlinalg-blas" }
+tlinalg-testkit = { path = "crates/tlinalg-testkit" }
 faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
 # Spelled exactly as tenferro pins it, so both resolve one strided-rs source and share
 # `RawStridedRef`.
@@ -21,6 +28,13 @@ strided-view = { git = "https://github.com/tensor4all/strided-rs.git", rev = "c1
 num-complex = "0.4"
 rayon = "1.10"
 thiserror = "2"
+# LAPACK/BLAS provider only.
+lapack = "0.20"
+cblas-sys = "0.1"
+blas-src = { version = "0.14", default-features = false }
+lapack-src = "0.13"
+# Benchmarks only.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

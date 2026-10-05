@@ -6,7 +6,7 @@
 use num_complex::{Complex32, Complex64};
 use strided_view::RawStridedRef;
 use tlinalg::svd::{svd, svd_values};
-use tlinalg_traits::{Op, Parallel};
+use tlinalg::{LanePlan, Op, Parallel};
 
 /// Column-major `m x n` matrix with well-separated singular values.
 fn matrix(m: usize, n: usize) -> Vec<f64> {
@@ -49,14 +49,13 @@ fn check_svd(m: usize, n: usize, full: bool) {
     let mut vt = Vec::with_capacity(v_cols * n);
     svd(
         Op::Svd,
-        m,
-        n,
-        full,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        full,
         &mut u,
         &mut s,
         &mut vt,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
 
@@ -99,24 +98,22 @@ fn values_only_agrees_with_the_full_decomposition() {
     let mut full = Vec::new();
     svd(
         Op::Svd,
-        m,
-        n,
-        false,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        false,
         &mut Vec::new(),
         &mut full,
         &mut Vec::new(),
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
     let mut only = Vec::new();
     svd_values(
         Op::SvdValues,
-        m,
-        n,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
         &mut only,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
     for (got, want) in only.iter().zip(full.iter()) {
@@ -140,14 +137,13 @@ fn complex_and_f32_reconstruct() {
     let mut vt = Vec::new();
     svd(
         Op::Svd,
-        m,
-        n,
-        false,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        false,
         &mut u,
         &mut s,
         &mut vt,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
     // `s` is carried in the complex scalar type with a zero imaginary part.
@@ -183,14 +179,13 @@ fn complex_and_f32_reconstruct() {
     let mut vt32 = Vec::new();
     svd(
         Op::Svd,
-        m,
-        n,
-        false,
         RawStridedRef::new(&a32, &[m, n], &[1, m as isize], 0).unwrap(),
+        false,
         &mut u32,
         &mut s32,
         &mut vt32,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
 
@@ -200,14 +195,13 @@ fn complex_and_f32_reconstruct() {
     let mut vtr = Vec::new();
     svd(
         Op::Svd,
-        m,
-        n,
-        false,
         RawStridedRef::new(&ar, &[m, n], &[1, m as isize], 0).unwrap(),
+        false,
         &mut ur,
         &mut sr,
         &mut vtr,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
     assert!(sr[0] > 0.0);
@@ -224,14 +218,13 @@ fn outputs_are_cleared_before_being_filled() {
     let mut vt = vec![7.0f64; 99];
     svd(
         Op::Svd,
-        m,
-        n,
-        false,
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        false,
         &mut u,
         &mut s,
         &mut vt,
         Parallel::Sequential,
+        LanePlan::sequential(),
     )
     .unwrap();
     assert_eq!(u.len(), m * k);

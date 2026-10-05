@@ -32,14 +32,27 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -j 16 --workspace --all-targets -- -D warnings
+      - run: cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas,tlinalg-bench/link-openblas -- -D warnings
 
+  # The LAPACK kernels need linked symbols. `link-openblas` builds OpenBLAS from source through
+  # `openblas-src`, so no system package is required.
   test:
-    name: cargo test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: cargo test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -j 16 --workspace --profile ci --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas
+      # The injected symbol set exports ?gesvd but not ?gesdd, so the other driver has to be
+      # exercised too; OpenBLAS provides both symbols.
+      - run: cargo test -j 16 --workspace --profile ci --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas
+
+  # Without a vendor library the faer provider still runs in full and the LAPACK marshalling still
+  # has to compile.
+  test-unlinked:
+    name: cargo test (macos-latest, unlinked)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -10,10 +10,23 @@ the shared rules were unavailable.
 
 ## Repository-specific rules
 
-* `tlinalg-traits` is an interface crate. It contains no numerical kernels and no tensor types;
-  keep it that way.
-* The interface is published behaviour: changing `Parallel`, `LanePlan`, `Workspace` or `Error`
-  is a contract change and needs the design reviewed first.
+* `tlinalg` is a provider: tensor-free kernels plus the small vocabulary its own entry points take
+  (`Parallel`, `LanePlan`, `Scalar`, `Error`, `Op`). It contains no tensor types.
+* Every public entry point is batched (`docs/design/batched-api.md`); per-matrix kernels stay
+  crate-private, and `crates/tlinalg/src/batch.rs` is the only batch loop.
+* The interface a host requires of its linear-algebra providers belongs to the host (tenferro
+  defines it and adapts each provider to it). Do not reintroduce a shared trait crate here, and do
+  not shape these types for another provider: the sibling crate `tlinalg-blas` never depends on
+  `tlinalg`, nor `tlinalg` on it. Shared test helpers go in the dev-only, unpublished
+  `tlinalg-testkit` (only ever a `[dev-dependencies]` entry of a provider), never in either
+  provider; cross-provider checks go in `tlinalg-parity`, kernel benchmarks in `tlinalg-bench`. A
+  parity failure is a bug in a provider or in a documented convention, not a tolerance to loosen.
+* The public types are published behaviour: changing `Parallel`, `LanePlan`, `Error`, or the
+  batched contract in `docs/design/batched-api.md` is a contract change and needs the design
+  reviewed first.
+* `tlinalg-blas` owns its vocabulary (`Error`, `Op`, `Workspace`, `IndexWorkspace`, `Scalar`).
+  Its entry points take no parallelism token (LAPACK and BLAS own their threading), loop serially
+  over the batch, and query and acquire workspace once per call.
 * Keep SIMD and reusable strided kernels in `strided-rs`, not here.
 * Do not add a provider registry, autotuner, or automatic provider switching. Implementations are
   selected by the host.

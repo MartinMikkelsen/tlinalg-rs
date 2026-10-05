@@ -1,9 +1,45 @@
-//! faer-backed implementation of the [`tlinalg_traits`] interface.
+//! faer-backed, tensor-free linear-algebra kernels.
 //!
-//! This crate owns the per-item numerical kernels and their scratch. It does not own tensors,
-//! allocation policy, dtype dispatch, placement, or the execution context; a host supplies borrowed
-//! operands, a [`tlinalg_traits::Parallel`] token, a host-resolved [`tlinalg_traits::LanePlan`], and
-//! (where a kernel needs pooled buffers) a [`tlinalg_traits::Workspace`].
+//! This crate owns the numerical kernels, the batch loop over them, their scratch, and the small
+//! vocabulary its callers use to drive them: borrowed strided I/O, [`Parallel`], [`LanePlan`] and the
+//! typed [`Error`]. It does not own tensors, allocation policy, dtype dispatch, placement, or the
+//! execution context; a host supplies borrowed operands, output vectors, a [`Parallel`] token and a
+//! host-resolved [`LanePlan`]. Kernel scratch is native and per lane.
+//!
+//! The interface a host requires of its linear-algebra providers belongs to that host (tenferro
+//! defines it); this crate is one provider and defines only the types its own entry points take.
+//! The LAPACK provider (`tlinalg-blas`) is independent of this crate.
+//!
+//! # Batches
+//!
+//! Every entry point is batched (`docs/design/batched-api.md` in the repository): an input is a
+//! rank-`2 + B` [`strided_view::RawStridedRef`] `[rows, cols, b_1, ..., b_B]`, outputs are compact
+//! column-major items in batch order (first batch axis fastest), and the host's [`LanePlan`] decides
+//! how the batch is split across the [`Parallel`] pool. A failing call returns the error of its
+//! lowest-indexed failing item and leaves every library-created output vector empty.
+//!
+//! # Conventions
+//!
+//! Callers and their tests depend on these:
+//!
+//! | Operation | Convention |
+//! |---|---|
+//! | `svd` | returns `U`, non-increasing singular values, and `Vᴴ` (not `V`) |
+//! | `eigh` | reads the lower triangle, returns non-decreasing **real** values |
+//! | `cholesky` | reads the lower triangle |
+//! | factorizations | do **not** fail on exactly singular input unless the table below says so |
+//! | solves | report [`Error::Singular`] for a singular factor |
+//!
+//! Failure behaviour of this provider (it is deliberately not normalized against other providers):
+//!
+//! | Route | Exactly singular input |
+//! |---|---|
+//! | partial-pivot LU in `solve` | [`Error::Singular`] |
+//! | full-pivot LU | not an error |
+//!
+//! Dtype dispatch and the deliberate "unsupported for this dtype" cases stay in the host: this
+//! crate never names a host `DType`. Terminal storage—tensor construction, placement tagging, and
+//! the error wrapper that carries an error into the host's error type—also stays in the host.
 //!
 //! Parallelism is faer's own: faer takes a thread count and runs on the current rayon registry, so
 //! an implementation **installs the caller's pool** for the duration of a call and derives
@@ -12,14 +48,35 @@
 
 #![warn(missing_docs)]
 
+pub mod cholesky;
+pub mod eig;
+pub mod eigh;
+pub mod error;
+pub mod full_piv_lu;
+pub mod householder;
+pub mod lane;
+pub mod lu;
 pub mod packed_lu;
+pub mod parallel;
+pub mod qr;
+pub mod scratch;
 pub mod svd;
+pub mod triangular_solve;
 
+mod batch;
 mod scalar;
+mod util;
 
+pub use error::{Error, NonFiniteRole, Op, Result};
+pub use lane::LanePlan;
+pub use parallel::Parallel;
 pub use scalar::FaerScalar;
+pub use scratch::Scalar;
 
-use tlinalg_traits::Parallel;
+mod sealed {
+    /// Seals [`crate::Scalar`].
+    pub trait Sealed {}
+}
 
 /// Run `f` on the caller's pool, with faer parallelism derived from the caller's budget.
 ///
@@ -38,17 +95,6 @@ where
     match par {
         Parallel::Sequential => f(faer::Par::Seq),
         Parallel::Pool { pool, budget } => pool.install(|| f(faer::Par::rayon(budget.get()))),
-    }
-}
-
-/// The `faer::Par` a token denotes, for sizing work that does not run yet.
-///
-/// Scratch sizing depends on the thread count faer will use, so a caller that builds scratch
-/// before entering the pool needs the same mapping [`with_parallel`] applies.
-pub(crate) fn faer_par(par: Parallel<'_>) -> faer::Par {
-    match par {
-        Parallel::Sequential => faer::Par::Seq,
-        Parallel::Pool { budget, .. } => faer::Par::rayon(budget.get()),
     }
 }
 

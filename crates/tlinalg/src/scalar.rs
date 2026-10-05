@@ -9,22 +9,28 @@
 
 use num_complex::{Complex32, Complex64};
 
-/// A [`tlinalg_traits::Scalar`] this crate implements kernels for.
+/// A [`crate::Scalar`] this crate implements kernels for.
 ///
 /// Sealed through `ScalarEntity`, which lives in this private module: implementors outside this
 /// crate cannot name the faer entity, so the cast surface stays internal.
-pub trait FaerScalar: tlinalg_traits::Scalar + Default + PartialEq + ScalarEntity {}
+pub trait FaerScalar: crate::Scalar + Default + PartialEq + ScalarEntity + EigScalar {}
 
 /// The faer-facing half of a [`FaerScalar`], crate-internal despite being `pub` in this private
 /// module.
-pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
+pub trait ScalarEntity: crate::Scalar + Default + PartialEq {
     /// The faer scalar sharing this type's memory layout.
-    type Entity: faer::traits::ComplexField + Copy + PartialEq + Default;
+    type Entity: faer::traits::ComplexField<Real = Self::Real> + Copy + PartialEq + Default;
 
     /// The real scalar this type's singular values and eigenvalues live in.
     ///
-    /// A host allocates those outputs, so this is a [`tlinalg_traits::Scalar`] too.
-    type Real: tlinalg_traits::Scalar + Default + PartialEq;
+    /// A host allocates those outputs, so this is a [`crate::Scalar`] too.
+    type Real: crate::Scalar + Default + PartialEq + faer::traits::RealField + Copy;
+
+    /// The complex scalar a general eigendecomposition of this type returns.
+    type Complex: crate::Scalar + Default + PartialEq;
+
+    /// Machine epsilon of the real scalar, widened to `f64`.
+    const EPSILON: f64;
 
     /// Reinterpret a slice as the faer entity type.
     fn entity_slice(data: &[Self]) -> &[Self::Entity];
@@ -47,15 +53,59 @@ pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
     /// A decomposition returns real singular values through the entity type, so this is the identity
     /// for the real scalars and the real part for the complex ones.
     fn real_from_entity(entity: Self::Entity) -> Self::Real;
+
+    /// This scalar with real part `re` and a zero imaginary part.
+    fn from_real(re: Self::Real) -> Self;
+
+    /// The real part of this scalar.
+    fn real_part(self) -> Self::Real;
+
+    /// The faer entity with real part `re` and a zero imaginary part.
+    fn entity_from_real(re: Self::Real) -> Self::Entity;
+
+    /// `1 / re`, in the real scalar.
+    fn recip_real(re: Self::Real) -> Self::Real;
+
+    /// The magnitude of an entity in `f64`: `|x|` for the real scalars, `hypot(re, im)` evaluated
+    /// in `f64` for the complex ones. This is the measure the pivot and rank tests were written
+    /// against, so it is computed exactly as they computed it.
+    fn entity_magnitude(entity: Self::Entity) -> f64;
+}
+
+/// The general-eigendecomposition kernels for one scalar, crate-internal despite being `pub` in
+/// this private module.
+///
+/// Real input runs faer's real eigensolver and converts the result to complex; complex input runs
+/// the complex one. The two need different faer entry points, so each scalar implements this in
+/// `crate::eig`.
+pub trait EigScalar: ScalarEntity {
+    /// One lane's eigensolver storage for `n x n` matrices.
+    type EigScratch: Send;
+
+    /// Size the lane scratch.
+    fn eig_scratch(n: usize, vectors: bool, par: faer::Par) -> Self::EigScratch;
+
+    /// Eigenvalues (and, when `vectors` is `Some`, column-major eigenvectors) of `mat`, pushed.
+    fn eig_into(
+        op: crate::Op,
+        mat: faer::MatRef<'_, Self::Entity>,
+        values: &mut dyn crate::batch::Push<Self::Complex>,
+        vectors: Option<&mut dyn crate::batch::Push<Self::Complex>>,
+        scratch: &mut Self::EigScratch,
+        par: faer::Par,
+    ) -> crate::Result<()>;
 }
 
 macro_rules! impl_real_scalar {
-    ($scalar:ty) => {
+    ($scalar:ty, $complex:ty) => {
         impl FaerScalar for $scalar {}
 
         impl ScalarEntity for $scalar {
             type Entity = $scalar;
             type Real = $scalar;
+            type Complex = $complex;
+
+            const EPSILON: f64 = <$scalar>::EPSILON as f64;
 
             fn entity_slice(data: &[Self]) -> &[Self::Entity] {
                 data
@@ -84,6 +134,26 @@ macro_rules! impl_real_scalar {
             fn real_from_entity(entity: Self::Entity) -> Self::Real {
                 entity
             }
+
+            fn from_real(re: Self::Real) -> Self {
+                re
+            }
+
+            fn real_part(self) -> Self::Real {
+                self
+            }
+
+            fn entity_from_real(re: Self::Real) -> Self::Entity {
+                re
+            }
+
+            fn recip_real(re: Self::Real) -> Self::Real {
+                1.0 / re
+            }
+
+            fn entity_magnitude(entity: Self::Entity) -> f64 {
+                entity.abs() as f64
+            }
         }
     };
 }
@@ -104,6 +174,9 @@ macro_rules! impl_complex_scalar {
         impl ScalarEntity for $scalar {
             type Entity = $entity;
             type Real = $real;
+            type Complex = $scalar;
+
+            const EPSILON: f64 = <$real>::EPSILON as f64;
 
             fn entity_slice(data: &[Self]) -> &[Self::Entity] {
                 // SAFETY: the const assertions above pin size, alignment and field offsets, so both
@@ -133,11 +206,31 @@ macro_rules! impl_complex_scalar {
             fn real_from_entity(entity: Self::Entity) -> Self::Real {
                 entity.re
             }
+
+            fn from_real(re: Self::Real) -> Self {
+                Self::new(re, 0.0)
+            }
+
+            fn real_part(self) -> Self::Real {
+                self.re
+            }
+
+            fn entity_from_real(re: Self::Real) -> Self::Entity {
+                <$entity>::new(re, 0.0)
+            }
+
+            fn recip_real(re: Self::Real) -> Self::Real {
+                1.0 / re
+            }
+
+            fn entity_magnitude(entity: Self::Entity) -> f64 {
+                (entity.re as f64).hypot(entity.im as f64)
+            }
         }
     };
 }
 
-impl_real_scalar!(f32);
-impl_real_scalar!(f64);
+impl_real_scalar!(f32, Complex32);
+impl_real_scalar!(f64, Complex64);
 impl_complex_scalar!(Complex32, faer::c32, f32);
 impl_complex_scalar!(Complex64, faer::c64, f64);
