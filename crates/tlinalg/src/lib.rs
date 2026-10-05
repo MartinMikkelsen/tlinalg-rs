@@ -40,14 +40,23 @@
 
 #![warn(missing_docs)]
 
+pub mod cholesky;
+pub mod eig;
+pub mod eigh;
 pub mod error;
+pub mod full_piv_lu;
+pub mod householder;
 pub mod lane;
+pub mod lu;
 pub mod packed_lu;
 pub mod parallel;
+pub mod qr;
 pub mod scratch;
 pub mod svd;
+pub mod triangular_solve;
 
 mod scalar;
+mod util;
 
 pub use error::{Error, NonFiniteRole, Op, Result};
 pub use lane::LanePlan;
