@@ -14,7 +14,7 @@
 //!
 //! Internally faer still works in its own `Mat`/`Diag`/`MemBuffer` storage: that scratch is
 //! operation-local and stays native, exactly as before. This family therefore needs no
-//! [`tlinalg_traits::Workspace`].
+//! [`crate::Workspace`].
 //!
 //! # Conventions
 //!
@@ -30,8 +30,8 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::svd::ComputeSvdVectors;
 use faer::{Mat, MatRef};
 
+use crate::{Error, Op, Parallel, Result};
 use strided_view::RawStridedRef;
-use tlinalg_traits::{Error, Op, Parallel, Result};
 
 use crate::scalar::ScalarEntity;
 use crate::{faer_par, with_parallel, FaerScalar};

@@ -10,9 +10,13 @@ the shared rules were unavailable.
 
 ## Repository-specific rules
 
-* `tlinalg-traits` is an interface crate. It contains no numerical kernels and no tensor types;
-  keep it that way.
-* The interface is published behaviour: changing `Parallel`, `LanePlan`, `Workspace` or `Error`
+* `tlinalg` is a provider: tensor-free kernels plus the small vocabulary its own entry points take
+  (`Parallel`, `LanePlan`, `Workspace`, `IndexWorkspace`, `Scalar`, `Error`, `Op`). It contains no
+  tensor types.
+* The interface a host requires of its linear-algebra providers belongs to the host (tenferro
+  defines it and adapts each provider to it). Do not reintroduce a shared trait crate here, and do
+  not shape these types for another provider: `tlinalg-blas` is independent of this repository.
+* The public types are published behaviour: changing `Parallel`, `LanePlan`, `Workspace` or `Error`
   is a contract change and needs the design reviewed first.
 * Keep SIMD and reusable strided kernels in `strided-rs`, not here.
 * Do not add a provider registry, autotuner, or automatic provider switching. Implementations are

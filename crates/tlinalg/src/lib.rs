@@ -1,9 +1,37 @@
-//! faer-backed implementation of the [`tlinalg_traits`] interface.
+//! faer-backed, tensor-free linear-algebra kernels.
 //!
-//! This crate owns the per-item numerical kernels and their scratch. It does not own tensors,
-//! allocation policy, dtype dispatch, placement, or the execution context; a host supplies borrowed
-//! operands, a [`tlinalg_traits::Parallel`] token, a host-resolved [`tlinalg_traits::LanePlan`], and
-//! (where a kernel needs pooled buffers) a [`tlinalg_traits::Workspace`].
+//! This crate owns the per-item numerical kernels, their scratch, and the small vocabulary its
+//! callers use to drive them: borrowed strided I/O, [`Parallel`], [`LanePlan`], [`Workspace`] and
+//! the typed [`Error`]. It does not own tensors, allocation policy, dtype dispatch, placement, or the
+//! execution context; a host supplies borrowed operands, a [`Parallel`] token, a host-resolved
+//! [`LanePlan`], and (where a kernel needs pooled buffers) a [`Workspace`].
+//!
+//! The interface a host requires of its linear-algebra providers belongs to that host (tenferro
+//! defines it); this crate is one provider and defines only the types its own entry points take.
+//! The LAPACK provider (`tlinalg-blas`) is independent of this crate.
+//!
+//! # Conventions
+//!
+//! Callers and their tests depend on these:
+//!
+//! | Operation | Convention |
+//! |---|---|
+//! | `svd` | returns `U`, non-increasing singular values, and `Vᴴ` (not `V`) |
+//! | `eigh` | reads the lower triangle, returns non-decreasing **real** values |
+//! | `cholesky` | reads the lower triangle |
+//! | factorizations | do **not** fail on exactly singular input unless the table below says so |
+//! | solves | report [`Error::Singular`] for a singular factor |
+//!
+//! Failure behaviour of this provider (it is deliberately not normalized against other providers):
+//!
+//! | Route | Exactly singular input |
+//! |---|---|
+//! | partial-pivot LU in `solve` | [`Error::Singular`] |
+//! | full-pivot LU | not an error |
+//!
+//! Dtype dispatch and the deliberate "unsupported for this dtype" cases stay in the host: this
+//! crate never names a host `DType`. Terminal storage—tensor construction, placement tagging, and
+//! the error wrapper that carries an error into the host's error type—also stays in the host.
 //!
 //! Parallelism is faer's own: faer takes a thread count and runs on the current rayon registry, so
 //! an implementation **installs the caller's pool** for the duration of a call and derives
@@ -12,14 +40,25 @@
 
 #![warn(missing_docs)]
 
+pub mod error;
+pub mod lane;
 pub mod packed_lu;
+pub mod parallel;
+pub mod scratch;
 pub mod svd;
 
 mod scalar;
 
+pub use error::{Error, NonFiniteRole, Op, Result};
+pub use lane::LanePlan;
+pub use parallel::Parallel;
 pub use scalar::FaerScalar;
+pub use scratch::{IndexWorkspace, Scalar, Workspace};
 
-use tlinalg_traits::Parallel;
+mod sealed {
+    /// Seals [`crate::Scalar`].
+    pub trait Sealed {}
+}
 
 /// Run `f` on the caller's pool, with faer parallelism derived from the caller's budget.
 ///

@@ -10,13 +10,13 @@
 //! `matrices * m * n` elements, and the same whole-matrix count applies to the pivots, the parity
 //! and any right-hand side. The host owns the batch split and the fan-out: it partitions the batch
 //! with `chunk = batch.div_ceil(lanes)` and calls these functions once per chunk with
-//! [`tlinalg_traits::Parallel::Sequential`], or once with the resolved item policy when it decided
+//! [`crate::Parallel::Sequential`], or once with the resolved item policy when it decided
 //! on a single lane. Nothing here re-derives lanes from a thread count, and nothing here validates
 //! the whole batch — each call validates only the buffer lengths it receives.
 //!
 //! Scratch is native and per chunk: four permutation vectors and one faer `MemBuffer`, reused
 //! across every matrix of the chunk. Nothing in this family takes pooled buffers, so it needs no
-//! [`tlinalg_traits::Workspace`].
+//! [`crate::Workspace`].
 
 use core::marker::PhantomData;
 
@@ -24,7 +24,7 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::prelude::ReborrowMut;
 use faer::{Conj, MatMut, MatRef};
 
-use tlinalg_traits::{Error, Op, Parallel, Result};
+use crate::{Error, Op, Parallel, Result};
 
 use crate::{faer_par, with_parallel, FaerScalar};
 

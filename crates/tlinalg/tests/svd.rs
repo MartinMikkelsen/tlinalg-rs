@@ -6,7 +6,7 @@
 use num_complex::{Complex32, Complex64};
 use strided_view::RawStridedRef;
 use tlinalg::svd::{svd, svd_values};
-use tlinalg_traits::{Op, Parallel};
+use tlinalg::{Op, Parallel};
 
 /// Column-major `m x n` matrix with well-separated singular values.
 fn matrix(m: usize, n: usize) -> Vec<f64> {

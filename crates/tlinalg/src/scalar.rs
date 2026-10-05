@@ -9,22 +9,22 @@
 
 use num_complex::{Complex32, Complex64};
 
-/// A [`tlinalg_traits::Scalar`] this crate implements kernels for.
+/// A [`crate::Scalar`] this crate implements kernels for.
 ///
 /// Sealed through `ScalarEntity`, which lives in this private module: implementors outside this
 /// crate cannot name the faer entity, so the cast surface stays internal.
-pub trait FaerScalar: tlinalg_traits::Scalar + Default + PartialEq + ScalarEntity {}
+pub trait FaerScalar: crate::Scalar + Default + PartialEq + ScalarEntity {}
 
 /// The faer-facing half of a [`FaerScalar`], crate-internal despite being `pub` in this private
 /// module.
-pub trait ScalarEntity: tlinalg_traits::Scalar + Default + PartialEq {
+pub trait ScalarEntity: crate::Scalar + Default + PartialEq {
     /// The faer scalar sharing this type's memory layout.
     type Entity: faer::traits::ComplexField + Copy + PartialEq + Default;
 
     /// The real scalar this type's singular values and eigenvalues live in.
     ///
-    /// A host allocates those outputs, so this is a [`tlinalg_traits::Scalar`] too.
-    type Real: tlinalg_traits::Scalar + Default + PartialEq;
+    /// A host allocates those outputs, so this is a [`crate::Scalar`] too.
+    type Real: crate::Scalar + Default + PartialEq;
 
     /// Reinterpret a slice as the faer entity type.
     fn entity_slice(data: &[Self]) -> &[Self::Entity];

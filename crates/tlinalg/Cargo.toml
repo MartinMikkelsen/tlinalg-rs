@@ -1,6 +1,6 @@
 [package]
 name = "tlinalg"
-description = "faer-backed implementation of the tlinalg tensor-free numerical interface."
+description = "faer-backed tensor-free linear-algebra kernels with their own borrowed I/O, scratch, parallelism and error vocabulary."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ faer = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
 strided-view = { workspace = true }
-tlinalg-traits = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

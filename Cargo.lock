@@ -939,15 +939,6 @@ dependencies = [
  "num-complex",
  "rayon",
  "strided-view",
- "tlinalg-traits",
-]
-
-[[package]]
-name = "tlinalg-traits"
-version = "0.1.0"
-dependencies = [
- "num-complex",
- "rayon",
  "thiserror 2.0.21",
 ]
 

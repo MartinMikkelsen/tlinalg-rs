@@ -25,7 +25,7 @@ use rayon::ThreadPool;
 /// # Example
 ///
 /// ```
-/// use tlinalg_traits::Parallel;
+/// use tlinalg::Parallel;
 /// assert!(matches!(Parallel::Sequential, Parallel::Sequential));
 /// ```
 #[derive(Clone, Copy, Debug)]

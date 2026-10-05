@@ -22,7 +22,7 @@ use crate::Parallel;
 /// # Example
 ///
 /// ```
-/// use tlinalg_traits::{LanePlan, Parallel};
+/// use tlinalg::{LanePlan, Parallel};
 /// let plan = LanePlan { lanes: 1, item_parallel: Parallel::Sequential };
 /// assert_eq!(plan.lanes, 1);
 /// ```

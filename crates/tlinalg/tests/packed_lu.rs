@@ -7,7 +7,7 @@
 
 use num_complex::{Complex32, Complex64};
 use tlinalg::packed_lu::{factor_chunk, factor_solve_chunk, solve_prepared_chunk, FactorScratch};
-use tlinalg_traits::{Error, Op, Parallel};
+use tlinalg::{Error, Op, Parallel};
 
 /// Compact column-major `n x n` matrix chosen so partial pivoting actually swaps: the leading entry
 /// is zero, but the rest of the first column is not, so the matrix stays nonsingular.

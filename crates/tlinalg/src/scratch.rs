@@ -48,7 +48,7 @@
 //!
 //! ```
 //! use core::mem::MaybeUninit;
-//! use tlinalg_traits::{Scalar, Workspace};
+//! use tlinalg::{Scalar, Workspace};
 //!
 //! struct Owned;
 //! impl Workspace<f64> for Owned {
@@ -131,7 +131,7 @@ pub trait Workspace<T: Scalar> {
 /// # Example
 ///
 /// ```
-/// use tlinalg_traits::IndexWorkspace;
+/// use tlinalg::IndexWorkspace;
 ///
 /// struct Owned;
 /// impl IndexWorkspace for Owned {

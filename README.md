@@ -6,30 +6,33 @@ Tensor-free linear algebra for the Tensor4all stack.
 the kernels and the batch/scheduling behaviour; the host owns tensors, allocation, dtype dispatch,
 placement, execution context and error wrapping.
 
-## Crates
+## Crate
 
-| Crate | Role |
-|---|---|
-| `tlinalg-traits` | The vocabulary that crosses the boundary: borrowed strided I/O, scratch acquisition, parallelism, lane policy, typed errors. No kernels, no tensor types. |
+`tlinalg` is the faer-backed provider. It owns the per-item kernels (SVD, packed LU, Cholesky,
+triangular solve, LU and solve, full-pivot LU, QR and column-pivoted QR, Hermitian and general
+eigendecompositions, compact Householder QR) and the vocabulary its entry points take: borrowed
+strided I/O, scratch acquisition (`Workspace`), parallelism (`Parallel`), lane policy (`LanePlan`)
+and typed errors (`Error`). No tensor types.
 
-The faer-backed implementation (`tlinalg`) lands in this repository. The LAPACK/BLAS implementation
-lives in [`tlinalg-blas-rs`](https://github.com/tensor4all/tlinalg-blas-rs); both share
-`tlinalg-traits` and neither depends on the other, nor on `tprims`.
+The interface a host requires of its linear-algebra providers is defined by the host: tenferro owns
+it and adapts each provider to it. The LAPACK/BLAS provider lives in
+[`tlinalg-blas-rs`](https://github.com/tensor4all/tlinalg-blas-rs) and does not depend on this
+repository.
 
 ## Contracts
 
-`tlinalg-traits` is the frozen interface, so its documentation is the specification:
+The crate documentation is the specification:
 
-* numerical conventions and per-provider failure behaviour — crate root of `tlinalg-traits`;
-* the parallelism and budget contract — `tlinalg_traits::Parallel`;
-* the batch lane contract — `tlinalg_traits::LanePlan`;
-* buffer ownership and initialization — `tlinalg_traits::Workspace`;
-* the error vocabulary — `tlinalg_traits::Error`.
+* numerical conventions and failure behaviour — crate root of `tlinalg`;
+* the parallelism and budget contract — `tlinalg::Parallel`;
+* the batch lane contract — `tlinalg::LanePlan`;
+* buffer ownership and initialization — `tlinalg::Workspace`;
+* the error vocabulary — `tlinalg::Error`.
 
 ## Status
 
-Interface extraction in progress. Nothing is published; `publish = false` is set deliberately until
-the interface and the package names settle.
+Extraction in progress. Nothing is published; `publish = false` is set deliberately until the
+interface and the package names settle.
 
 ## Build
 
