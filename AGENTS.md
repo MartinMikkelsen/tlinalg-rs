@@ -16,11 +16,15 @@ the shared rules were unavailable.
   crate-private, and `crates/tlinalg/src/batch.rs` is the only batch loop.
 * The interface a host requires of its linear-algebra providers belongs to the host (tenferro
   defines it and adapts each provider to it). Do not reintroduce a shared trait crate here, and do
-  not shape these types for another provider: `tlinalg-blas` (joining this workspace as a sibling
-  crate) never depends on `tlinalg`, nor `tlinalg` on it.
+  not shape these types for another provider: the sibling crate `tlinalg-blas` never depends on
+  `tlinalg`, nor `tlinalg` on it. Shared test helpers go in a dev-only, unpublished crate, never in
+  either provider.
 * The public types are published behaviour: changing `Parallel`, `LanePlan`, `Error`, or the
   batched contract in `docs/design/batched-api.md` is a contract change and needs the design
   reviewed first.
+* `tlinalg-blas` owns its vocabulary (`Error`, `Op`, `Workspace`, `IndexWorkspace`, `Scalar`).
+  Its entry points take no parallelism token (LAPACK and BLAS own their threading), loop serially
+  over the batch, and query and acquire workspace once per call.
 * Keep SIMD and reusable strided kernels in `strided-rs`, not here.
 * Do not add a provider registry, autotuner, or automatic provider switching. Implementations are
   selected by the host.

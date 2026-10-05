@@ -1,0 +1,39 @@
+[package]
+name = "tlinalg-blas"
+description = "LAPACK/BLAS-backed tensor-free linear algebra kernels for the Tensor4all stack."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Select the `?gesvd` driver instead of `?gesdd`, matching tenferro's `provider-inject` symbol set:
+# the injected LAPACK exports `?gesvd` but not `?gesdd`.
+provider-inject = []
+# Link OpenBLAS for this crate's own tests. Tenferro selects the source and the injected-symbol
+# path itself; this feature only exists so the crate has an executable check of its own.
+link-openblas = ["dep:blas-src", "dep:lapack-src"]
+
+[dependencies]
+lapack = { workspace = true }
+cblas-sys = { workspace = true }
+strided-view = { workspace = true }
+thiserror = { workspace = true }
+num-complex = { workspace = true }
+
+[dependencies.blas-src]
+workspace = true
+optional = true
+features = ["openblas"]
+
+[dependencies.lapack-src]
+workspace = true
+optional = true
+features = ["openblas"]
+
+[lints]
+workspace = true

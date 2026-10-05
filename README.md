@@ -6,7 +6,14 @@ Tensor-free linear algebra for the Tensor4all stack.
 the kernels and the batch/scheduling behaviour; the host owns tensors, allocation, dtype dispatch,
 placement, execution context and error wrapping.
 
-## Crate
+## Crates
+
+| Crate | Role |
+|---|---|
+| `tlinalg` | The faer-backed provider, with the batch-direction lane fan-out on the caller's rayon pool. |
+| `tlinalg-blas` | The LAPACK/BLAS provider: vendor calls and their argument marshalling, a serial batch loop, vendor-owned threading. |
+
+The two providers are siblings: neither depends on the other, and each owns its own vocabulary.
 
 `tlinalg` is the faer-backed provider. It owns batched kernels (SVD, packed LU, Cholesky,
 triangular solve, LU and solve, full-pivot LU, QR and column-pivoted QR, Hermitian and general
@@ -14,10 +21,13 @@ eigendecompositions, compact Householder QR), the batch loop and lane fan-out ov
 vocabulary its entry points take: borrowed strided I/O, parallelism (`Parallel`), lane policy
 (`LanePlan`) and typed errors (`Error`). No tensor types.
 
+`tlinalg-blas` has the same batched shape without a parallelism token: LAPACK and BLAS own their
+threading, the batch loop is serial, and scratch comes from a host `Workspace`, queried and acquired
+once per call and reused for every item. It was developed as `tensor4all/tlinalg-blas-rs` and merged
+here with its history.
+
 The interface a host requires of its linear-algebra providers is defined by the host: tenferro owns
-it and adapts each provider to it. The LAPACK/BLAS provider currently lives in
-[`tlinalg-blas-rs`](https://github.com/tensor4all/tlinalg-blas-rs) and is joining this workspace as a
-sibling crate; the two providers do not depend on each other.
+it and adapts each provider to it.
 
 ## Contracts
 
@@ -42,9 +52,15 @@ interface and the package names settle.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -j 16 --workspace --all-targets -- -D warnings
-cargo test -j 16 --workspace
+cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas -- -D warnings
+cargo test -j 16 --workspace --features tlinalg-blas/link-openblas
+cargo test -j 16 --workspace --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject
 ```
+
+`link-openblas` exists only so `tlinalg-blas` has an executable check of its own; it builds OpenBLAS
+from source through `openblas-src`. Tenferro selects the vendor and the injected-symbol path
+itself, so the feature is not part of the implementation contract. Without it the workspace still
+builds and lints; the LAPACK tests are skipped.
 
 ## License
 
