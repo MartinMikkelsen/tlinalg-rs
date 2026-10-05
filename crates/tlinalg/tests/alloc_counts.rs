@@ -5,45 +5,13 @@
 //! scratch, independent of the batch size. This test pins those counts for one lane so a
 //! regression shows up as a number.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use strided_view::RawStridedRef;
 use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
 use tlinalg::{LanePlan, Op, Parallel};
-
-struct Counting;
-
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-// SAFETY: forwards to the system allocator unchanged; only counts calls.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: forwarded with the caller's layout.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: forwarded with the caller's pointer and layout.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: forwarded unchanged.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+use tlinalg_testkit::alloc::{steady, Counting};
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
-
-/// Allocations made by the second of two identical calls (the first warms up).
-fn steady(mut call: impl FnMut()) -> usize {
-    call();
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    call();
-    ALLOCATIONS.load(Ordering::Relaxed) - before
-}
 
 /// `batch` compact, well-conditioned `n x n` matrices.
 fn batch_of(n: usize, batch: usize) -> Vec<f64> {

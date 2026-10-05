@@ -35,5 +35,8 @@ workspace = true
 optional = true
 features = ["openblas"]
 
+[dev-dependencies]
+tlinalg-testkit = { workspace = true }
+
 [lints]
 workspace = true

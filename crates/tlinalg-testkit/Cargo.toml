@@ -1,0 +1,17 @@
+[package]
+name = "tlinalg-testkit"
+description = "Dev-only, provider-neutral test helpers shared by the tlinalg and tlinalg-blas test suites."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+num-complex = { workspace = true }
+strided-view = { workspace = true }
+
+[lints]
+workspace = true

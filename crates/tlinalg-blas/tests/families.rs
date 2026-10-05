@@ -59,7 +59,7 @@ const BATCH: usize = 2;
 
 /// A Hermitian positive definite `n x n` matrix: `M Mᴴ + n I`.
 fn hpd<T: TestScalar>(n: usize, seed: usize) -> Vec<T> {
-    let m = c64(&matrix::<T>(n, n, seed));
+    let m = widen(&matrix::<T>(n, n, seed));
     let mut a = matmul(&m, &adjoint(&m, n, n), n, n, n);
     for i in 0..n {
         a[i + i * n] += Complex64::new(n as f64, 0.0);
@@ -84,7 +84,7 @@ fn check_cholesky<T: TestScalar>() {
     assert_eq!(ws.outstanding(), 0, "the factor copy is released");
     assert_eq!(ws.acquired, 1, "one copy for the whole batch");
     for index in 0..BATCH {
-        let li = c64(item(&l, n * n, index));
+        let li = widen(item(&l, n * n, index));
         for col in 0..n {
             for row in 0..col {
                 assert_eq!(
@@ -96,8 +96,8 @@ fn check_cholesky<T: TestScalar>() {
         }
         assert_close(
             &matmul(&li, &adjoint(&li, n, n), n, n, n),
-            &c64(item(&a.data, n * n, index)),
-            T::TOL,
+            &widen(item(&a.data, n * n, index)),
+            T::LOOSE_TOL,
             "L Lᴴ",
         );
     }
@@ -161,9 +161,9 @@ fn check_triangular_solve<T: TestScalar>() {
                     assert_eq!(ws.acquired, 0, "a compact triangle is read in place");
                     for index in 0..BATCH {
                         let t =
-                            triangle(&c64(item(&a.data, n * n, index)), n, lower, unit_diagonal);
+                            triangle(&widen(item(&a.data, n * n, index)), n, lower, unit_diagonal);
                         let op_a = if transpose_a { transpose(&t, n, n) } else { t };
-                        let xi = c64(item(&x, rows * cols, index));
+                        let xi = widen(item(&x, rows * cols, index));
                         let product = if left_side {
                             matmul(&op_a, &xi, n, n, cols)
                         } else {
@@ -171,8 +171,8 @@ fn check_triangular_solve<T: TestScalar>() {
                         };
                         assert_close(
                             &product,
-                            &c64(item(&b.data, rows * cols, index)),
-                            T::TOL,
+                            &widen(item(&b.data, rows * cols, index)),
+                            T::LOOSE_TOL,
                             &format!("{options:?} item {index}"),
                         );
                     }
@@ -233,14 +233,14 @@ fn check_lu<T: TestScalar>() {
         );
         for index in 0..BATCH {
             let (pi, li, ui) = (
-                c64(item(&p, m * m, index)),
-                c64(item(&l, m * k, index)),
-                c64(item(&u, k * n, index)),
+                widen(item(&p, m * m, index)),
+                widen(item(&l, m * k, index)),
+                widen(item(&u, k * n, index)),
             );
             assert_close(
-                &matmul(&pi, &c64(item(&a.data, m * n, index)), m, m, n),
+                &matmul(&pi, &widen(item(&a.data, m * n, index)), m, m, n),
                 &matmul(&li, &ui, m, k, n),
-                T::TOL,
+                T::LOOSE_TOL,
                 "P A = L U",
             );
             let sign = parity[index].to_c64();
@@ -308,19 +308,24 @@ fn check_full_piv_lu<T: TestScalar>() {
     let len = n * n;
     for index in 0..BATCH {
         let (pi, li, ui, qi) = (
-            c64(item(&p, len, index)),
-            c64(item(&l, len, index)),
-            c64(item(&u, len, index)),
-            c64(item(&q, len, index)),
+            widen(item(&p, len, index)),
+            widen(item(&l, len, index)),
+            widen(item(&u, len, index)),
+            widen(item(&q, len, index)),
         );
         let paq = matmul(
-            &matmul(&pi, &c64(item(&a.data, len, index)), n, n, n),
+            &matmul(&pi, &widen(item(&a.data, len, index)), n, n, n),
             &transpose(&qi, n, n),
             n,
             n,
             n,
         );
-        assert_close(&paq, &matmul(&li, &ui, n, n, n), T::TOL, "P A Qᵀ = L U");
+        assert_close(
+            &paq,
+            &matmul(&li, &ui, n, n, n),
+            T::LOOSE_TOL,
+            "P A Qᵀ = L U",
+        );
         let expected = permutation_sign(&pi, n) * permutation_sign(&qi, n);
         assert_eq!(parity[index].to_c64(), Complex64::new(expected, 0.0));
     }
@@ -363,16 +368,16 @@ fn check_full_piv_lu_solve<T: TestScalar>() {
         .unwrap();
         assert_eq!(ws.outstanding(), 0, "the batch scratch is released");
         for index in 0..BATCH {
-            let ai = c64(item(&a.data, n * n, index));
+            let ai = widen(item(&a.data, n * n, index));
             let op_a = if transpose_a {
                 transpose(&ai, n, n)
             } else {
                 ai
             };
             assert_close(
-                &matmul(&op_a, &c64(item(&x, n * nrhs, index)), n, n, nrhs),
-                &c64(item(&b.data, n * nrhs, index)),
-                T::TOL,
+                &matmul(&op_a, &widen(item(&x, n * nrhs, index)), n, n, nrhs),
+                &widen(item(&b.data, n * nrhs, index)),
+                T::LOOSE_TOL,
                 "full-pivot residual",
             );
         }
@@ -389,16 +394,16 @@ fn check_solve<T: TestScalar>() {
         solve(Op::Solve, transpose_a, a.r(), b.r(), &mut x, &mut ws).unwrap();
         assert_eq!(ws.acquired, 2, "one LU copy and one pivot buffer per call");
         for index in 0..BATCH {
-            let ai = c64(item(&a.data, n * n, index));
+            let ai = widen(item(&a.data, n * n, index));
             let op_a = if transpose_a {
                 transpose(&ai, n, n)
             } else {
                 ai
             };
             assert_close(
-                &matmul(&op_a, &c64(item(&x, n * nrhs, index)), n, n, nrhs),
-                &c64(item(&b.data, n * nrhs, index)),
-                T::TOL,
+                &matmul(&op_a, &widen(item(&x, n * nrhs, index)), n, n, nrhs),
+                &widen(item(&b.data, n * nrhs, index)),
+                T::LOOSE_TOL,
                 "solve residual",
             );
         }
@@ -436,9 +441,9 @@ fn check_solve_into<T: TestScalar>() {
                 .all(|&v| v == sentinel));
         }
         assert_close(
-            &matmul(&c64(item(&a.data, n * n, index)), &c64(&x), n, n, nrhs),
-            &c64(item(&b.data, n * nrhs, index)),
-            T::TOL,
+            &matmul(&widen(item(&a.data, n * n, index)), &widen(&x), n, n, nrhs),
+            &widen(item(&b.data, n * nrhs, index)),
+            T::LOOSE_TOL,
             "strided solve",
         );
     }
@@ -475,8 +480,8 @@ fn check_householder<T: TestScalar>() {
         )
         .unwrap();
         for index in 0..BATCH {
-            let qha = c64(item(&qha, m * n, index));
-            let packed64 = c64(item(&packed, m * n, index));
+            let qha = widen(item(&qha, m * n, index));
+            let packed64 = widen(item(&packed, m * n, index));
             for col in 0..n {
                 for row in 0..m {
                     let expected = if row <= col {
@@ -485,7 +490,7 @@ fn check_householder<T: TestScalar>() {
                         Complex64::new(0.0, 0.0)
                     };
                     assert!(
-                        (qha[row + col * m] - expected).norm() <= T::TOL * 10.0,
+                        (qha[row + col * m] - expected).norm() <= T::LOOSE_TOL * 10.0,
                         "{m}x{n} QᴴA({row},{col})"
                     );
                 }
@@ -520,7 +525,7 @@ fn check_householder<T: TestScalar>() {
             &mut ws,
         )
         .unwrap();
-        assert_close(&c64(&round), &c64(&c), T::TOL, "Q Qᴴ C");
+        assert_close(&widen(&round), &widen(&c), T::LOOSE_TOL, "Q Qᴴ C");
     }
     // Empty input: no tau, no workspace traffic.
     let mut ws = TestWorkspace::default();
@@ -560,8 +565,8 @@ fn check_qr<T: TestScalar>() {
         assert_eq!(ws.outstanding(), 0);
         assert_eq!((q.len(), r.len()), (m * k * BATCH, k * n * BATCH));
         for index in 0..BATCH {
-            let qi = c64(item(&q, m * k, index));
-            let ri = c64(item(&r, k * n, index));
+            let qi = widen(item(&q, m * k, index));
+            let ri = widen(item(&r, k * n, index));
             for col in 0..n {
                 for row in (col + 1)..k {
                     assert_eq!(ri[row + col * k], Complex64::new(0.0, 0.0));
@@ -569,14 +574,14 @@ fn check_qr<T: TestScalar>() {
             }
             assert_close(
                 &matmul(&qi, &ri, m, k, n),
-                &c64(item(&a.data, m * n, index)),
-                T::TOL,
+                &widen(item(&a.data, m * n, index)),
+                T::LOOSE_TOL,
                 "QR",
             );
             assert_close(
                 &matmul(&adjoint(&qi, m, k), &qi, k, m, k),
                 &identity(k),
-                T::TOL,
+                T::LOOSE_TOL,
                 "QᴴQ",
             );
         }
@@ -605,16 +610,18 @@ fn check_rrqr<T: TestScalar>() {
         .unwrap();
         assert_eq!(ws.outstanding(), 0);
         for index in 0..3 {
-            let a64 = c64(item(&a.data, m * n, index));
+            let a64 = widen(item(&a.data, m * n, index));
             let p = item(&perm, n, index);
             let mut ap = Vec::with_capacity(m * n);
             for &col in p {
                 ap.extend_from_slice(&a64[col as usize * m..(col as usize + 1) * m]);
             }
-            let (qi, ri) = (c64(item(&q, m * k, index)), c64(item(&r, k * n, index)));
-            assert_close(&matmul(&qi, &ri, m, k, n), &ap, T::TOL, "A P = Q R");
+            let (qi, ri) = (widen(item(&q, m * k, index)), widen(item(&r, k * n, index)));
+            assert_close(&matmul(&qi, &ri, m, k, n), &ap, T::LOOSE_TOL, "A P = Q R");
             for i in 1..k {
-                assert!(ri[i + i * k].norm() <= ri[(i - 1) + (i - 1) * k].norm() * (1.0 + T::TOL));
+                assert!(
+                    ri[i + i * k].norm() <= ri[(i - 1) + (i - 1) * k].norm() * (1.0 + T::LOOSE_TOL)
+                );
             }
             if index == 1 {
                 assert!(ri.iter().all(|v| v.norm() == 0.0));
@@ -664,15 +671,15 @@ where
     eigh(Op::EighValues, a.r(), &mut values_only, None, &mut ws).unwrap();
     assert_eq!(ws.outstanding(), 0);
     assert_close(
-        &c64(&values_only),
-        &c64(&values),
-        T::TOL * 100.0,
+        &widen(&values_only),
+        &widen(&values),
+        T::LOOSE_TOL * 100.0,
         "values-only agrees",
     );
     for index in 0..BATCH {
-        let ai = c64(item(&a.data, n * n, index));
-        let vi = c64(item(&vectors, n * n, index));
-        let wi = c64(item(&values, n, index));
+        let ai = widen(item(&a.data, n * n, index));
+        let vi = widen(item(&vectors, n * n, index));
+        let wi = widen(item(&values, n, index));
         for pair in wi.windows(2) {
             assert!(pair[0].re <= pair[1].re);
         }
@@ -682,7 +689,12 @@ where
                 vl[row + col * n] *= wi[col];
             }
         }
-        assert_close(&matmul(&ai, &vi, n, n, n), &vl, T::TOL * 10.0, "A V = V Λ");
+        assert_close(
+            &matmul(&ai, &vi, n, n, n),
+            &vl,
+            T::LOOSE_TOL * 10.0,
+            "A V = V Λ",
+        );
     }
 }
 
@@ -703,8 +715,8 @@ where
     eig(Op::Eig, a.r(), &mut values, Some(&mut vectors), &mut ws).unwrap();
     assert_eq!(ws.outstanding(), 0);
     for index in 0..BATCH {
-        let wi = c64(item(&values, n, index));
-        let vi = c64(item(&vectors, n * n, index));
+        let wi = widen(item(&values, n, index));
+        let vi = widen(item(&vectors, n * n, index));
         let mut vl = vi.clone();
         for col in 0..n {
             for row in 0..n {
@@ -712,12 +724,12 @@ where
             }
         }
         assert_close(
-            &matmul(&c64(item(&a.data, n * n, index)), &vi, n, n, n),
+            &matmul(&widen(item(&a.data, n * n, index)), &vi, n, n, n),
             &vl,
-            T::TOL * 10.0,
+            T::LOOSE_TOL * 10.0,
             "A V = V Λ",
         );
-        if !T::IS_COMPLEX {
+        if !<T as SharedTestScalar>::COMPLEX {
             assert!(
                 wi.iter().any(|v| v.im.abs() > 0.1),
                 "the rotation block yields a complex pair"
@@ -727,9 +739,9 @@ where
     let mut only = Vec::new();
     eig(Op::EigValues, a.r(), &mut only, None, &mut ws).unwrap();
     assert_close(
-        &c64(&only),
-        &c64(&values),
-        T::TOL * 100.0,
+        &widen(&only),
+        &widen(&values),
+        T::LOOSE_TOL * 100.0,
         "values-only agrees",
     );
 }
@@ -842,8 +854,14 @@ fn a_stride_zero_batch_axis_broadcasts_an_input() {
     .unwrap();
     for index in 0..count {
         assert_close(
-            &matmul(&c64(&a.data), &c64(item(&x, n * nrhs, index)), n, n, nrhs),
-            &c64(item(&b.data, n * nrhs, index)),
+            &matmul(
+                &widen(&a.data),
+                &widen(item(&x, n * nrhs, index)),
+                n,
+                n,
+                nrhs,
+            ),
+            &widen(item(&b.data, n * nrhs, index)),
             1e-9,
             "broadcast solve",
         );

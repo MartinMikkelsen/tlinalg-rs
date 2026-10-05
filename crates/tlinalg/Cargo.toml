@@ -16,5 +16,8 @@ rayon = { workspace = true }
 strided-view = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tlinalg-testkit = { workspace = true }
+
 [lints]
 workspace = true

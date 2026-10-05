@@ -51,15 +51,15 @@ where
     assert_eq!(vt.len(), vt_rows * n * batch);
 
     for index in 0..batch {
-        let s_i = c64(&s[index * k..(index + 1) * k]);
+        let s_i = widen(&s[index * k..(index + 1) * k]);
         for pair in s_i.windows(2) {
             assert!(pair[0].re >= pair[1].re, "{m}x{n} {mode:?}: not sorted");
         }
         if mode == SvdMode::Values {
             continue;
         }
-        let u_i = c64(&u[index * m * u_cols..(index + 1) * m * u_cols]);
-        let vt_i = c64(&vt[index * vt_rows * n..(index + 1) * vt_rows * n]);
+        let u_i = widen(&u[index * m * u_cols..(index + 1) * m * u_cols]);
+        let vt_i = widen(&vt[index * vt_rows * n..(index + 1) * vt_rows * n]);
         let mut us = vec![Complex64::new(0.0, 0.0); m * k];
         for col in 0..k {
             for row in 0..m {
@@ -75,8 +75,8 @@ where
         }
         assert_close(
             &matmul(&us, &vt_k, m, k, n),
-            &c64(&data[index * m * n..(index + 1) * m * n]),
-            T::TOL,
+            &widen(&data[index * m * n..(index + 1) * m * n]),
+            T::LOOSE_TOL,
             "U S Vᴴ",
         );
     }

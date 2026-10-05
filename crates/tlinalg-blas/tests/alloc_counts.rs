@@ -11,9 +11,7 @@
 
 #![cfg(feature = "link-openblas")]
 
-use core::cell::Cell;
 use core::mem::MaybeUninit;
-use std::alloc::{GlobalAlloc, Layout, System};
 
 use strided_view::RawStridedRef;
 use tlinalg_blas::cholesky::cholesky;
@@ -24,48 +22,10 @@ use tlinalg_blas::solve::solve;
 use tlinalg_blas::svd::{svd, SvdMode, SvdOutputs};
 use tlinalg_blas::triangular_solve::{triangular_solve, TriangularSolveOptions};
 use tlinalg_blas::{IndexWorkspace, Op, Workspace};
-
-struct Counting;
-
-thread_local! {
-    static COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
-fn bump() {
-    let _ = COUNT.try_with(|count| count.set(count.get() + 1));
-}
-
-// SAFETY: forwards every call to the system allocator unchanged; only counts.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        bump();
-        // SAFETY: same contract as the caller's.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        bump();
-        // SAFETY: same contract as the caller's.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        bump();
-        // SAFETY: same contract as the caller's.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: same contract as the caller's.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+use tlinalg_testkit::alloc::{allocations, Counting};
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
-
-fn allocations(f: impl FnOnce()) -> usize {
-    let before = COUNT.with(Cell::get);
-    f();
-    COUNT.with(Cell::get) - before
-}
 
 /// A host-shaped workspace that recycles: a released buffer is handed out again (best fit), so a
 /// warmed-up call allocates nothing through it.

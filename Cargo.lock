@@ -1269,6 +1269,7 @@ dependencies = [
  "rayon",
  "strided-view",
  "thiserror 2.0.21",
+ "tlinalg-testkit",
 ]
 
 [[package]]
@@ -1282,6 +1283,15 @@ dependencies = [
  "num-complex",
  "strided-view",
  "thiserror 2.0.21",
+ "tlinalg-testkit",
+]
+
+[[package]]
+name = "tlinalg-testkit"
+version = "0.1.0"
+dependencies = [
+ "num-complex",
+ "strided-view",
 ]
 
 [[package]]
