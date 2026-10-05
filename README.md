@@ -15,9 +15,9 @@ strided I/O, scratch acquisition (`Workspace`), parallelism (`Parallel`), lane p
 and typed errors (`Error`). No tensor types.
 
 The interface a host requires of its linear-algebra providers is defined by the host: tenferro owns
-it and adapts each provider to it. The LAPACK/BLAS provider lives in
-[`tlinalg-blas-rs`](https://github.com/tensor4all/tlinalg-blas-rs) and does not depend on this
-repository.
+it and adapts each provider to it. The LAPACK/BLAS provider currently lives in
+[`tlinalg-blas-rs`](https://github.com/tensor4all/tlinalg-blas-rs) and is joining this workspace as a
+sibling crate; the two providers do not depend on each other.
 
 ## Contracts
 
