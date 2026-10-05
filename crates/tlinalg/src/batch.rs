@@ -327,6 +327,21 @@ impl<U> Sink<'_, U> {
         self.pos += 1;
     }
 
+    /// Write the next `len` elements as `value(0), ..., value(len - 1)` and return them, now
+    /// initialised, for the kernel to update in place. Panics (safely) past the chunk end.
+    pub(crate) fn fill(&mut self, len: usize, mut value: impl FnMut(usize) -> U) -> &mut [U] {
+        let start = self.pos;
+        let region = &mut self.buf[start..start + len];
+        for (index, slot) in region.iter_mut().enumerate() {
+            slot.write(value(index));
+        }
+        self.pos += len;
+        // SAFETY: every element of `region` was written just above, so the `MaybeUninit<U>`
+        // slice is fully initialised; `MaybeUninit<U>` has the layout of `U`, and the returned
+        // borrow keeps `self` (and so the chunk) exclusively borrowed while it lives.
+        unsafe { &mut *(region as *mut [MaybeUninit<U>] as *mut [U]) }
+    }
+
     fn is_full(&self) -> bool {
         self.pos == self.buf.len()
     }
@@ -374,21 +389,19 @@ impl<U> Chunk<'_, U> {
 ///
 /// `ptr..ptr + len` is valid for writes (and reads, once initialised) for `'a`, and nothing else
 /// accesses it while any returned slice is alive.
-unsafe fn split_raw<'a, X>(
+unsafe fn split_raw<'a, X: 'a>(
     ptr: *mut X,
     len: usize,
     piece: usize,
     lanes: usize,
-) -> Vec<&'a mut [X]> {
-    (0..lanes)
-        .map(|lane| {
-            let start = (lane * piece).min(len);
-            let end = (start + piece).min(len);
-            // SAFETY: `start..end` lies in `0..len` and distinct lanes get disjoint ranges; the
-            // caller guarantees validity and exclusivity for `'a`.
-            unsafe { core::slice::from_raw_parts_mut(ptr.add(start), end - start) }
-        })
-        .collect()
+) -> impl Iterator<Item = &'a mut [X]> {
+    (0..lanes).map(move |lane| {
+        let start = (lane * piece).min(len);
+        let end = (start + piece).min(len);
+        // SAFETY: `start..end` lies in `0..len` and distinct lanes get disjoint ranges; the
+        // caller guarantees validity and exclusivity for `'a`.
+        unsafe { core::slice::from_raw_parts_mut(ptr.add(start), end - start) }
+    })
 }
 
 /// The outputs of one batched call, split per lane.
@@ -447,7 +460,6 @@ impl<'a, U: Send> Outputs for Out<'a, U> {
         // `ptr` and covers `total` elements; the caller keeps the vector untouched while the lanes
         // live.
         unsafe { split_raw(ptr, total, chunk * self.item_len, batch.div_ceil(chunk)) }
-            .into_iter()
             .map(|buf| Sink { buf, pos: 0 })
             .collect()
     }
@@ -511,7 +523,6 @@ impl<'a, U: Send> Outputs for InPlace<'a, U> {
                 batch.div_ceil(chunk),
             )
         }
-        .into_iter()
         .enumerate()
         .map(|(lane, slice)| Chunk {
             slice,

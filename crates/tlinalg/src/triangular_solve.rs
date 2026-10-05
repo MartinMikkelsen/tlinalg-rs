@@ -8,7 +8,8 @@
 //! `[b_rows, b_cols, b...]`, both borrowed strided descriptors. The solution `x` is cleared and
 //! filled with compact column-major items in batch order:
 //!
-//! * a left-side solve `A X = B` copies `B` into the item's output chunk and solves it in place;
+//! * a left-side solve `A X = B` writes `B` straight into the item's output chunk (one copy) and
+//!   solves it there in place;
 //! * a right-side solve `X A = B` is the left-side solve of the transposed system, so `B` is
 //!   transposed into a lane-local buffer, solved, and transposed out into the output chunk. The
 //!   buffer is lane scratch, reused for every item of the lane (the pre-extraction host borrowed
@@ -17,7 +18,7 @@
 use faer::{Mat, MatMut, MatRef};
 use strided_view::RawStridedRef;
 
-use crate::batch::{self, out, same_batch, BatchedRef, Push};
+use crate::batch::{self, out, same_batch, BatchedRef, Sink};
 use crate::util::invalid;
 use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
 
@@ -64,12 +65,17 @@ fn solve_in_place<E: faer::traits::ComplexField>(
     }
 }
 
-/// Solve one system. `work` is a compact `n x nrhs` lane buffer.
+/// Solve one system into the lane's output chunk.
+///
+/// Left side: `B` is written straight into the item's output region (that write initialises it)
+/// and solved there in place — one copy of `B`, as the pre-batching route made into its pooled
+/// right-hand side. Right side: `Bᵀ` is solved in the lane's compact `n x b_rows` work matrix and
+/// transposed out.
 fn triangular_solve_item<T: FaerScalar>(
     a: MatRef<'_, T::Entity>,
     b: MatRef<'_, T::Entity>,
     flags: TriangularSolveFlags,
-    x: &mut impl Push<T>,
+    x: &mut Sink<'_, T>,
     work: &mut Mat<T::Entity>,
     par: faer::Par,
 ) {
@@ -79,26 +85,22 @@ fn triangular_solve_item<T: FaerScalar>(
         transpose_a,
         unit_diagonal,
     } = flags;
+    let (b_rows, b_cols) = (b.nrows(), b.ncols());
     if left_side {
-        // `work` is `n x b_cols`: B, solved in place, pushed column-major.
-        work.copy_from(b);
-        solve_in_place(a, work.as_mut(), lower, transpose_a, unit_diagonal, par);
+        let region = x.fill(b_rows * b_cols, |index| {
+            T::from_entity(b[(index % b_rows, index / b_rows)])
+        });
+        let rhs = MatMut::from_column_major_slice_mut(T::entity_slice_mut(region), b_rows, b_cols);
+        solve_in_place(a, rhs, lower, transpose_a, unit_diagonal, par);
     } else {
         // Right-side solve `X A = B` is the left-side solve of the transposed system, so the RHS is
-        // transposed in and out and the triangle/transpose flags flip once. `work` is
-        // `n x b_rows` = `Bᵀ`.
+        // transposed in and out and the triangle/transpose flags flip once.
         work.copy_from(b.transpose());
         solve_in_place(a, work.as_mut(), lower, !transpose_a, unit_diagonal, par);
-    }
-    let work = if left_side {
-        work.as_ref()
-    } else {
-        work.as_ref().transpose()
-    };
-    for col in 0..work.ncols() {
-        for row in 0..work.nrows() {
-            x.push(T::from_entity(work[(row, col)]));
-        }
+        let solved = work.as_ref().transpose();
+        x.fill(b_rows * b_cols, |index| {
+            T::from_entity(solved[(index % b_rows, index / b_rows)])
+        });
     }
 }
 
@@ -175,7 +177,14 @@ pub fn triangular_solve<T: FaerScalar>(
         par,
         plan,
         &mut (out(x, item_len),),
-        |_| Mat::<T::Entity>::zeros(n, nrhs),
+        // Only the right-side route needs a work matrix; an empty `Mat` does not allocate.
+        |_| {
+            if flags.left_side {
+                Mat::<T::Entity>::zeros(0, 0)
+            } else {
+                Mat::<T::Entity>::zeros(n, nrhs)
+            }
+        },
         |index, (x,), work, par| {
             triangular_solve_item::<T>(a.item(index), b.item(index), flags, x, work, par);
             Ok(())
