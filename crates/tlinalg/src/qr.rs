@@ -5,14 +5,16 @@
 //! Both return the **raw** faer factors: no sign/phase gauge is applied, matching the
 //! pre-extraction `qr` and `rank_revealing_qr` paths (the positive-diagonal gauge of the compact
 //! Householder family is applied by the host when it extracts `Q` and `R`). For the rank-revealing
-//! variant the rank decision (tolerances, the non-finite screen, the all-zero shortcut) stays in
-//! the host; [`magnitude`] is the diagonal measure it was computed with.
+//! variant the rank decision (tolerances) and the non-finite screen stay in the host; [`magnitude`]
+//! is the diagonal measure it was computed with. An all-zero item is not factored: it gets the
+//! leading identity columns as `Q`, a zero `R` and the identity permutation, exactly as
+//! `tlinalg-blas` and the pre-extraction host did.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::{Conj, Mat, MatRef};
 use strided_view::RawStridedRef;
 
-use crate::batch::{self, out, BatchedRef, Push};
+use crate::batch::{self, out, BatchedRef, Push, Sink};
 use crate::util::{checked_product, invalid, push_masked, push_mat};
 use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
 
@@ -52,7 +54,9 @@ impl<E: faer::traits::ComplexField> QrScratch<E> {
             work: Mat::zeros(m, n),
             coeff: Mat::zeros(block_size, k),
             q: Mat::zeros(m, k),
-            permutation: vec![0; if pivoting { n } else { 0 }],
+            // On 64-bit targets the permutation is written straight into the `i64` output, so only
+            // the inverse needs lane storage.
+            permutation: vec![0; if pivoting && !PERMUTATION_IN_OUTPUT { n } else { 0 }],
             inverse_permutation: vec![0; if pivoting { n } else { 0 }],
             factor_mem: MemBuffer::new(factor_req),
             apply_mem: MemBuffer::new(
@@ -120,37 +124,74 @@ fn qr_item<T: FaerScalar>(
     push_factors::<T>(scratch, q, r);
 }
 
+/// Whether faer's `usize` permutation can be written straight into the `i64` output: true where
+/// the two types share size and alignment (64-bit targets). Elsewhere a lane buffer is converted.
+const PERMUTATION_IN_OUTPUT: bool = core::mem::size_of::<usize>() == core::mem::size_of::<i64>()
+    && core::mem::align_of::<usize>() == core::mem::align_of::<i64>();
+
 fn rank_revealing_qr_item<T: FaerScalar>(
     op: Op,
     mat: MatRef<'_, T::Entity>,
-    (q, r, permutation): (&mut impl Push<T>, &mut impl Push<T>, &mut impl Push<i64>),
+    (q, r, permutation): (&mut impl Push<T>, &mut impl Push<T>, &mut Sink<'_, i64>),
     scratch: &mut QrScratch<T::Entity>,
     par: faer::Par,
 ) -> Result<()> {
+    let (m, n) = (mat.nrows(), mat.ncols());
+    let k = m.min(n);
+    let all_zero = (0..n).all(|col| (0..m).all(|row| T::entity_magnitude(mat[(row, col)]) == 0.0));
+    if all_zero {
+        // Rank zero by the host's rule: the leading identity columns, a zero `R`, no pivoting.
+        for col in 0..k {
+            for row in 0..m {
+                q.push(if row == col {
+                    T::parity(false)
+                } else {
+                    T::default()
+                });
+            }
+        }
+        for _ in 0..k * n {
+            r.push(T::default());
+        }
+        permutation.fill(n, |column| column as i64);
+        return Ok(());
+    }
     scratch.work.copy_from(mat);
     scratch
         .coeff
         .fill(<T::Entity as faer::traits::ComplexField>::zero_impl());
+    let region = permutation.fill(n, |_| 0);
+    let forward: &mut [usize] = if PERMUTATION_IN_OUTPUT {
+        // SAFETY: `PERMUTATION_IN_OUTPUT` holds only when `usize` and `i64` have the same size and
+        // alignment, and every bit pattern is valid for both, so the initialised `i64` region is a
+        // valid `[usize]` of the same length for the borrow. faer writes column indices below
+        // `n <= isize::MAX`, which read back as the same non-negative `i64` values.
+        unsafe {
+            core::slice::from_raw_parts_mut(region.as_mut_ptr().cast::<usize>(), region.len())
+        }
+    } else {
+        &mut scratch.permutation
+    };
     // Following faer 0.24's public column-pivoted QR factor API; the provider's forward
     // permutation is the public gather convention.
     faer::linalg::qr::col_pivoting::factor::qr_in_place(
         scratch.work.as_mut(),
         scratch.coeff.as_mut(),
-        &mut scratch.permutation,
+        forward,
         &mut scratch.inverse_permutation,
         par,
         MemStack::new(&mut scratch.factor_mem),
         Default::default(),
     );
+    if !PERMUTATION_IN_OUTPUT {
+        for (slot, &column) in region.iter_mut().zip(&scratch.permutation) {
+            *slot = i64::try_from(column).map_err(|_| {
+                invalid(op, "configuration", "column permutation exceeds i64 range")
+            })?;
+        }
+    }
     scratch.form_q(par);
     push_factors::<T>(scratch, q, r);
-    for &column in &scratch.permutation {
-        permutation.push(
-            i64::try_from(column).map_err(|_| {
-                invalid(op, "configuration", "column permutation exceeds i64 range")
-            })?,
-        );
-    }
     Ok(())
 }
 
@@ -227,7 +268,10 @@ pub fn magnitude<T: FaerScalar>(value: T) -> f64 {
 ///
 /// `input` is `[m, n, b...]`. Per item, `q` (`m x min(m, n)`) and `r` (`min(m, n) x n`, upper
 /// trapezoidal) receive column-major factors, and `permutation` receives `n` column indices in the
-/// public gather convention: column `j` of `A P` is column `permutation[j]` of `A`.
+/// public gather convention: column `j` of `A P` is column `permutation[j]` of `A`. An all-zero
+/// item is not factored: it gets the leading `min(m, n)` identity columns as `Q`, a zero `R` and
+/// the identity permutation (its rank is zero by the host's rule). Non-finite input is the host's
+/// to screen.
 ///
 /// # Errors
 ///

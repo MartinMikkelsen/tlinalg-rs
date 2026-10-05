@@ -527,6 +527,49 @@ macro_rules! parity_suite {
             }
 
             #[test]
+            fn rank_revealing_qr_all_zero_items() {
+                // Items 1 and 3 of five are all zero; both providers skip the factorization for them
+                // and agree exactly: identity Q columns, zero R, identity permutation.
+                for (m, n) in [(4, 4), (5, 3), (3, 5)] {
+                    let k = m.min(n);
+                    let a = input(m, n, &[5], Layout::Gapped, |i| {
+                        if i == 1 || i == 3 {
+                            vec![T::default(); m * n]
+                        } else {
+                            matrix::<T>(m, n, i)
+                        }
+                    });
+                    let (mut fq, mut fr, mut fperm) = (Vec::new(), Vec::new(), Vec::new());
+                    tlinalg::qr::rank_revealing_qr(tlinalg::Op::RankRevealingQr, a.view(), &mut fq, &mut fr, &mut fperm, SEQ, plan())
+                        .unwrap();
+                    let (mut bq, mut br, mut bperm) = (Vec::new(), Vec::new(), Vec::new());
+                    tlinalg_blas::qr::rank_revealing_qr(
+                        tlinalg_blas::Op::RankRevealingQr,
+                        a.view(),
+                        tlinalg_blas::qr::RankRevealingQrOutputs { q: &mut bq, r: &mut br, permutation: &mut bperm },
+                        &mut Ws,
+                    )
+                    .unwrap();
+                    let what = format!("rrqr all-zero {m}x{n}");
+                    assert_eq!(fperm, bperm, "{what}: column permutation");
+                    for index in [1, 3] {
+                        assert_eq!(item(&fq, m * k, index), item(&bq, m * k, index), "{what}: Q");
+                        assert_eq!(item(&fr, k * n, index), item(&br, k * n, index), "{what}: R");
+                        let identity: Vec<i64> = (0..n as i64).collect();
+                        assert_eq!(item(&fperm, n, index), &identity[..], "{what}: permutation");
+                        let q = widen(item(&fq, m * k, index));
+                        for col in 0..k {
+                            for row in 0..m {
+                                let want = if row == col { 1.0 } else { 0.0 };
+                                assert_eq!(q[row + col * m], Complex64::new(want, 0.0), "{what}: Q entry");
+                            }
+                        }
+                        assert!(widen(item(&fr, k * n, index)).iter().all(|z| *z == Complex64::new(0.0, 0.0)), "{what}: R");
+                    }
+                }
+            }
+
+            #[test]
             fn eigh() {
                 let n = 5;
                 for (dims, layout) in configs() {

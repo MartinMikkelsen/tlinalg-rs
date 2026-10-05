@@ -72,6 +72,13 @@ impl AxisList {
         }
     }
 
+    fn as_mut_slice(&mut self) -> &mut [(usize, isize)] {
+        match self {
+            Self::Inline { len, axes } => &mut axes[..*len],
+            Self::Heap(axes) => axes,
+        }
+    }
+
     fn last_mut(&mut self) -> Option<&mut (usize, isize)> {
         match self {
             Self::Inline { len, axes } => axes[..*len].last_mut(),
@@ -265,15 +272,19 @@ fn is_injective(dims: &[usize], strides: &[isize]) -> bool {
     if dims.contains(&0) {
         return true;
     }
-    let mut axes: Vec<(usize, usize)> = dims
-        .iter()
-        .zip(strides)
-        .filter(|(&dim, _)| dim > 1)
-        .map(|(&dim, &stride)| (stride.unsigned_abs(), dim))
-        .collect();
-    axes.sort_unstable();
+    // Inline (no allocation for up to eight non-trivial axes) and sorted in place: unstable, since
+    // a stable sort may allocate a merge buffer.
+    let mut axes = AxisList::new();
+    for (&dim, &stride) in dims.iter().zip(strides) {
+        if dim > 1 {
+            axes.push((dim, stride));
+        }
+    }
+    let axes = axes.as_mut_slice();
+    axes.sort_unstable_by_key(|&(dim, stride)| (stride.unsigned_abs(), dim));
     let mut span = 0usize;
-    for (stride, dim) in axes {
+    for &(dim, stride) in axes.iter() {
+        let stride = stride.unsigned_abs();
         if stride <= span {
             return false;
         }

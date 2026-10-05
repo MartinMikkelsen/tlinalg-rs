@@ -5,7 +5,7 @@
 //! scratch, independent of the batch size. This test pins those counts for one lane so a
 //! regression shows up as a number.
 
-use strided_view::RawStridedRef;
+use strided_view::{RawStridedMut, RawStridedRef};
 use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
 use tlinalg::{LanePlan, Op, Parallel};
 use tlinalg_testkit::alloc::{steady, Counting};
@@ -28,7 +28,7 @@ fn batch_of(n: usize, batch: usize) -> Vec<f64> {
 }
 
 /// Steady-state allocations per call of each family, one sequential lane, `n = 6`.
-fn family_counts(batch: usize) -> [(&'static str, usize); 7] {
+fn family_counts(batch: usize) -> [(&'static str, usize); 10] {
     let n = 6;
     let a = batch_of(n, batch);
     let (dims, strides) = ([n, n, batch], [1, n as isize, (n * n) as isize]);
@@ -65,8 +65,51 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 7] {
         )
         .unwrap();
     });
+    let mut perm = Vec::with_capacity(n * batch);
+    let rrqr = steady(|| {
+        tlinalg::qr::rank_revealing_qr(
+            Op::RankRevealingQr,
+            view,
+            &mut v1,
+            &mut v2,
+            &mut perm,
+            seq,
+            plan,
+        )
+        .unwrap();
+    });
+    let b = batch_of(n, batch);
+    let b_view = RawStridedRef::new(&b, &dims, &strides, 0).unwrap();
+    let mut x = vec![0.0; cap];
+    let solve = steady(|| {
+        tlinalg::lu::solve(
+            Op::Solve,
+            view,
+            Some(b_view),
+            RawStridedMut::new(&mut x, &dims, &strides, 0).unwrap(),
+            false,
+            seq,
+            plan,
+        )
+        .unwrap();
+    });
+    let full_piv_lu_solve = steady(|| {
+        tlinalg::full_piv_lu::full_piv_lu_solve(
+            Op::FullPivLuSolve,
+            view,
+            b_view,
+            false,
+            &mut v1,
+            seq,
+            plan,
+        )
+        .unwrap();
+    });
     [
         ("cholesky", cholesky),
+        ("rank_revealing_qr", rrqr),
+        ("solve", solve),
+        ("full_piv_lu_solve", full_piv_lu_solve),
         ("qr", qr),
         ("eigh", eigh),
         ("svd", svd),
@@ -123,8 +166,13 @@ fn per_call_allocations_do_not_grow_with_the_batch() {
         println!("{name}: {at_one} (batch 1), {at_many} (batch 64)");
         assert_eq!(at_one, at_many, "{name}: allocations grow with the batch");
     }
+    // Each count is at most the pre-extraction route's native allocations for the same call
+    // (rank_revealing_qr was 7, solve 5, full_piv_lu_solve 7).
     let expected = [
         ("cholesky", 2),
+        ("rank_revealing_qr", 6),
+        ("solve", 5),
+        ("full_piv_lu_solve", 7),
         ("qr", 5),
         ("eigh", 3),
         ("svd", 4),

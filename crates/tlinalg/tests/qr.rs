@@ -205,3 +205,28 @@ fn householder_rejects_bad_dimensions() {
     .unwrap();
     assert!(coeff.is_empty());
 }
+
+#[test]
+fn rank_revealing_qr_returns_the_identity_for_an_all_zero_item() {
+    use tlinalg::{LanePlan, Parallel};
+    // Item 0 is zero, item 1 is not: the zero item is not factored, the other is.
+    let (m, n) = (3, 4);
+    let mut a = vec![0.0_f64; m * n];
+    a.extend(matrix::<f64>(m, n, 1));
+    let (mut q, mut r, mut perm) = (Vec::new(), Vec::new(), Vec::new());
+    tlinalg::qr::rank_revealing_qr(
+        Op::RankRevealingQr,
+        RawStridedRef::new(&a, &[m, n, 2], &[1, m as isize, (m * n) as isize], 0).unwrap(),
+        &mut q,
+        &mut r,
+        &mut perm,
+        Parallel::Sequential,
+        LanePlan::sequential(),
+    )
+    .unwrap();
+    let k = m.min(n);
+    assert_eq!(&q[..m * k], &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    assert!(r[..k * n].iter().all(|&v| v == 0.0));
+    assert_eq!(&perm[..n], &[0, 1, 2, 3]);
+    assert!(r[k * n..].iter().any(|&v| v != 0.0));
+}

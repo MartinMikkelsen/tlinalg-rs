@@ -7,10 +7,10 @@
 //! permutation vectors and scratch are lane scratch, reused for every item of the lane.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 use strided_view::RawStridedRef;
 
-use crate::batch::{self, out, same_batch, BatchedRef, Push};
+use crate::batch::{self, out, same_batch, BatchedRef, Push, Sink};
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, invalid, push_masked, push_permutation};
 use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
@@ -168,14 +168,18 @@ pub fn full_piv_lu<T: FaerScalar>(
     )
 }
 
-/// Solve one system; `b` is copied into `work` only after the singularity check.
+/// Solve one system in the item's output region.
+///
+/// `b` is written into the region (initialising it) only after the singularity check, and the solve
+/// runs there in place: one copy of `b`, as the pre-extraction route made into its pooled
+/// right-hand side.
 fn full_piv_lu_solve_item<T: FaerScalar>(
     op: Op,
     a: MatRef<'_, T::Entity>,
     b: MatRef<'_, T::Entity>,
     transpose_a: bool,
-    x: &mut impl Push<T>,
-    (scratch, work, solve_mem): &mut (FullPivScratch<T::Entity>, Mat<T::Entity>, MemBuffer),
+    x: &mut Sink<'_, T>,
+    (scratch, solve_mem): &mut (FullPivScratch<T::Entity>, MemBuffer),
     par: faer::Par,
 ) -> Result<()> {
     let n = a.nrows();
@@ -189,7 +193,9 @@ fn full_piv_lu_solve_item<T: FaerScalar>(
             return Err(Error::Singular { op });
         }
     }
-    work.copy_from(b);
+    let nrhs = b.ncols();
+    let region = x.fill(n * nrhs, |index| T::from_entity(b[(index % n, index / n)]));
+    let mut work = MatMut::from_column_major_slice_mut(T::entity_slice_mut(region), n, nrhs);
     // SAFETY: the permutation vectors were filled by the factorization above as mutually inverse
     // permutations of `0..n`, which is exactly the invariant `PermRef::new_unchecked` requires.
     let (row_perm, col_perm) = unsafe {
@@ -219,11 +225,6 @@ fn full_piv_lu_solve_item<T: FaerScalar>(
             par,
             stack,
         );
-    }
-    for col in 0..work.ncols() {
-        for row in 0..n {
-            x.push(T::from_entity(work[(row, col)]));
-        }
     }
     Ok(())
 }
@@ -293,7 +294,6 @@ pub fn full_piv_lu_solve<T: FaerScalar>(
         |par| {
             (
                 FullPivScratch::<T::Entity>::new(n, par),
-                Mat::<T::Entity>::zeros(n, nrhs),
                 MemBuffer::new(
                     faer::linalg::lu::full_pivoting::solve::solve_in_place_scratch::<
                         usize,
