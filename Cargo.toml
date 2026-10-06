@@ -22,9 +22,9 @@ tlinalg = { version = "0.1.0", path = "crates/tlinalg" }
 tlinalg-blas = { version = "0.1.0", path = "crates/tlinalg-blas" }
 tlinalg-testkit = { path = "crates/tlinalg-testkit" }
 faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
-# Spelled exactly as tenferro pins it, so both resolve one strided-rs source and share
-# `RawStridedRef`.
-strided-view = { git = "https://github.com/tensor4all/strided-rs.git", rev = "c12d96fa4cfef622bc1f15fd9940fd418fb686ac", version = "0.4.5" }
+# Match the prepared CPU stack's reviewed strided #290 head, including terminal
+# pointer fixes. Hosts use this exact source to share `RawStridedRef` types.
+strided-view = { git = "https://github.com/tensor4all/strided-rs.git", rev = "722dc6bece0c845ee612fa21242521c2e5ea83ac", version = "0.4.5" }
 num-complex = "0.4"
 rayon = "1.10"
 thiserror = "2"
