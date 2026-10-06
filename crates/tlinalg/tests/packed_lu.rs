@@ -7,23 +7,12 @@
 
 use num_complex::{Complex32, Complex64};
 use strided_view::RawStridedRef;
-use tlinalg::packed_lu::{factor, factor_solve, solve_prepared};
-use tlinalg::{Error, FaerScalar, LanePlan, Op, Parallel};
+use tlinalg::packed_lu::{
+    factor as factor_chunk, factor_solve as factor_solve_chunk, solve_prepared,
+};
+use tlinalg::{Error, FaerScalar, Op, Parallel};
 
-// Shims with the pre-batching argument order, so the format tests below read as before: each runs
-// the batched entry point on one lane over a compact batch.
-
-fn factor_chunk<T: FaerScalar>(
-    op: Op,
-    m: usize,
-    n: usize,
-    lu: &mut [T],
-    pivots: &mut [i32],
-    parity: &mut [T],
-    par: Parallel<'_>,
-) -> tlinalg::Result<()> {
-    factor(op, m, n, lu, pivots, parity, par, LanePlan::single(par))
-}
+// The prepared-solve shim builds descriptors from the tests' compact buffers.
 
 #[allow(clippy::too_many_arguments)]
 fn solve_prepared_chunk<T: FaerScalar>(
@@ -51,29 +40,6 @@ fn solve_prepared_chunk<T: FaerScalar>(
         transpose_a,
         conjugate_a,
         par,
-        LanePlan::single(par),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn factor_solve_chunk<T: FaerScalar>(
-    op: Op,
-    n: usize,
-    nrhs: usize,
-    packed_lu: &mut [T],
-    pivots: &mut [i32],
-    output: &mut [T],
-    par: Parallel<'_>,
-) -> tlinalg::Result<()> {
-    factor_solve(
-        op,
-        n,
-        nrhs,
-        packed_lu,
-        pivots,
-        output,
-        par,
-        LanePlan::single(par),
     )
 }
 

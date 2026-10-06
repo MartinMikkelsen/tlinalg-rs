@@ -22,14 +22,20 @@ batch-direction fan-out). Per-matrix entry points become crate-private helpers.
 
 ## Parallelism (tlinalg only)
 
-* Arguments: `par: Parallel<'_>` (the call's pool + budget) and `plan: LanePlan<'_>` (host-resolved:
-  `lanes`, `item_parallel`). The **host** decides lanes (tenferro's `lane_plan`: batch policy,
-  forced strategies, thresholds, `can_fan_out_lanes`); tlinalg must not re-derive lanes.
-* `plan.lanes <= 1`: run all items in order with `plan.item_parallel`.
-* `plan.lanes > 1`: requires `par = Parallel::Pool`; install that pool, split the batch into
-  `chunk = batch.div_ceil(lanes)` contiguous chunks, run each chunk as a `rayon::scope` task with
-  `plan.item_parallel` for its items (normally `Sequential`, never nesting a second fan-out).
-  This replaces tenferro's `for_each_chunk`/`with_outer_lanes` for linalg.
+* One argument: `par: Parallel<'_>` (Sequential or caller-owned pool + requested budget).
+  **tlinalg owns Auto lane selection**, not the host. `LanePlan` is crate-private; there is no
+  forced-policy or benchmark escape hatch. See [library-owned-lanes.md](library-owned-lanes.md).
+* Effective requested width is `min(budget, pool.current_num_threads())`. Width one executes on
+  the calling thread, without installing a pool.
+* Ordinary families fan out only when `max(rows, cols) <= 64` and the batch has at least one item
+  per effective worker (and at least two workers). RHS/reflector target extents are included.
+  Packed LU's three routes retain their existing no-size-cutoff policy.
+* Outer tasks are contiguous chunks of `batch.div_ceil(width)` items on the supplied pool, using
+  `in_place_scope`; every outer child is sequential. Their count never exceeds effective width.
+  Otherwise one lane runs the batch in order, passing effective width to faer as an intra-item hint.
+* **faer 0.24.4 does not guarantee a strict active-thread bound from that hint.** Its wide-RHS
+  recursion and rounded-up splitting can exceed the requested count. This accepted limitation is
+  not hidden by serial fallback or replacement pools; no hard bound on all native work is claimed.
 * Scratch is per lane and reused across the items of that lane (faer `MemBuffer` sized once for the
   item shape; host `Workspace` where the family already uses it).
 * Errors: each lane stops at its own first failure and does **not** stop because another lane
@@ -49,14 +55,15 @@ becomes the batched API; its fan-out moves from tenferro into tlinalg).
 
 ## Host (tenferro) keeps
 
-Lane decision, dtype/placement dispatch, tensor construction, QR gauges, RRQR rank decision,
-Householder append/from-factors/gemm, negative-stride rejection, error mapping.
+Resource ownership/admission, dtype/placement dispatch, tensor construction, QR gauges, RRQR rank
+decision, Householder append/from-factors/gemm, negative-stride rejection, error mapping.
 
 ## Behaviour change to record
 
-Families other than packed LU previously looped sequentially over the batch in tenferro. With the
-host's existing `lane_plan`, Auto policy now fans them out over the batch too. This is intended
-(maintainer decision) and must be measured: tenferro-benchmark small-matrix batch cases.
+Families other than packed LU previously looped sequentially over the batch in tenferro. Batched
+extraction enabled outer fan-out; the single-token revision moves the existing default Auto policy
+into tlinalg. Host forced strategies/custom thresholds are removed from this provider's API.
+Integrated tenferro migration and its performance measurements remain a separate follow-up.
 
 ## Addendum: multiple batch axes (2026-10-05)
 
@@ -85,11 +92,9 @@ Recorded with the implementation; they refine, not replace, the contract above.
   and batch-axis normalisation (`BatchedRef`, `BatchedMut`, `BatchAxes`), lane split and fan-out
   (`run`), and output assembly (`Out` for library-created vectors, `InPlace` for host-owned compact
   buffers).
-* **Lane parallelism.** With `plan.lanes > 1` every lane runs its items with
-  `Parallel::Sequential`, matching tenferro's outer-lane children (`with_outer_lanes` hands each
-  lane a sequential child context). `plan.item_parallel` applies to the single-lane case only. With
-  `lanes > 1` and `par = Parallel::Sequential` the chunks run one after another on the calling
-  thread, like `with_outer_lanes` on a context that cannot fan out.
+* **Lane parallelism.** The private resolver selects outer lanes only for a pool with effective
+  width greater than one. Each child uses `Parallel::Sequential`; a single lane uses the sole call
+  token. A sequential resource never resolves to multiple lanes.
 * **Item offsets.** After normalisation a compact batch has one axis and an item offset is one
   multiply. A non-mergeable view decomposes the item index per item (`O(B)` integer work next to an
   `O(n³)` kernel) instead of carrying an odometer: items are addressed by index from independent

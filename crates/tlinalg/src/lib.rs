@@ -1,10 +1,9 @@
 //! faer-backed, tensor-free linear-algebra kernels.
 //!
 //! This crate owns the numerical kernels, the batch loop over them, their scratch, and the small
-//! vocabulary its callers use to drive them: borrowed strided I/O, [`Parallel`], [`LanePlan`] and the
-//! typed [`Error`]. It does not own tensors, allocation policy, dtype dispatch, placement, or the
-//! execution context; a host supplies borrowed operands, output vectors, a [`Parallel`] token and a
-//! host-resolved [`LanePlan`]. Kernel scratch is native and per lane.
+//! vocabulary its callers use to drive them: borrowed strided I/O, [`Parallel`] and typed [`Error`].
+//! It does not own tensors, allocation policy, dtype dispatch, placement, or the execution context;
+//! a host supplies operands, output vectors and one [`Parallel`] token. Kernel scratch is per lane.
 //!
 //! The interface a host requires of its linear-algebra providers belongs to that host (tenferro
 //! defines it); this crate is one provider and defines only the types its own entry points take.
@@ -14,8 +13,8 @@
 //!
 //! Every entry point is batched (`docs/design/batched-api.md` in the repository): an input is a
 //! rank-`2 + B` [`strided_view::RawStridedRef`] `[rows, cols, b_1, ..., b_B]`, outputs are compact
-//! column-major items in batch order (first batch axis fastest), and the host's [`LanePlan`] decides
-//! how the batch is split across the [`Parallel`] pool. A failing call returns the error of its
+//! column-major items in batch order (first batch axis fastest). The library selects Auto lanes
+//! from the shape and [`Parallel`] resource. A failing call returns the error of its
 //! lowest-indexed failing item and leaves every library-created output vector empty.
 //!
 //! # Conventions
@@ -43,8 +42,9 @@
 //!
 //! Parallelism is faer's own: faer takes a thread count and runs on the current rayon registry, so
 //! an implementation **installs the caller's pool** for the duration of a call and derives
-//! `faer::Par` from the caller's budget. It never creates a pool and never falls back to the
-//! ambient one.
+//! `faer::Par` from the pool-clamped requested budget. faer's count is a hint, not a strict
+//! active-thread bound (see [`Parallel`]); outer lanes are bounded and run sequential children.
+//! No pool is created and the ambient pool is never selected. Effective width one stays on the caller.
 
 #![warn(missing_docs)]
 
@@ -54,7 +54,7 @@ pub mod eigh;
 pub mod error;
 pub mod full_piv_lu;
 pub mod householder;
-pub mod lane;
+mod lane;
 pub mod lu;
 pub mod packed_lu;
 pub mod parallel;
@@ -68,7 +68,6 @@ mod scalar;
 mod util;
 
 pub use error::{Error, NonFiniteRole, Op, Result};
-pub use lane::LanePlan;
 pub use parallel::Parallel;
 pub use scalar::FaerScalar;
 pub use scratch::Scalar;
@@ -86,13 +85,13 @@ mod sealed {
 /// already inside runs the closure in place, so a host that has already entered its domain pays
 /// nothing.
 ///
-/// A budget larger than the pool is the caller's business: faer is told the budget and bounds its
-/// own fan-out by it.
+/// Clamp the requested faer count to pool width. This is a hint, not a hard active-thread bound.
+/// Effective width one stays on the caller without installing a pool.
 pub(crate) fn with_parallel<R>(par: Parallel<'_>, f: impl FnOnce(faer::Par) -> R + Send) -> R
 where
     R: Send,
 {
-    match par {
+    match par.bounded() {
         Parallel::Sequential => f(faer::Par::Seq),
         Parallel::Pool { pool, budget } => pool.install(|| f(faer::Par::rayon(budget.get()))),
     }

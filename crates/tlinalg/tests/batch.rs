@@ -10,15 +10,14 @@ use common::*;
 use num_complex::Complex64;
 use strided_view::{RawStridedMut, RawStridedRef};
 use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
-use tlinalg::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use tlinalg::{Error, FaerScalar, Op, Parallel, Result};
 
 /// Batch shapes every family is run over.
 const SHAPES: &[&[usize]] = &[&[], &[1], &[3], &[0], &[2, 3], &[2, 1, 2]];
 const LAYOUTS: [Layout; 3] = [Layout::Compact, Layout::Gapped, Layout::Transposed];
 
 /// A family under test: inputs in, every output widened to `Complex64`, one `Vec` per output.
-type Call<'f, T> =
-    &'f dyn Fn(RawStridedRef<'_, T>, Parallel<'_>, LanePlan<'_>) -> Result<Vec<Vec<Complex64>>>;
+type Call<'f, T> = &'f dyn Fn(RawStridedRef<'_, T>, Parallel<'_>) -> Result<Vec<Vec<Complex64>>>;
 
 /// Run `call` over every batch shape and layout and check the batch contract against per-item
 /// calls on compact single matrices.
@@ -38,7 +37,6 @@ fn check_family<T: TestScalar + FaerScalar>(
             let single = call(
                 RawStridedRef::new(item, &[m, n], &[1, m as isize], 0).unwrap(),
                 Parallel::Sequential,
-                LanePlan::sequential(),
             )
             .unwrap();
             match &mut expected {
@@ -52,9 +50,8 @@ fn check_family<T: TestScalar + FaerScalar>(
         }
         for layout in LAYOUTS {
             let buf = batch_buf(&items, m, n, shape, layout);
-            let sequential =
-                call(buf.view(), Parallel::Sequential, LanePlan::sequential()).unwrap();
-            let pooled = call(buf.view(), pool_token(&pool), three_lanes()).unwrap();
+            let sequential = call(buf.view(), Parallel::Sequential).unwrap();
+            let pooled = call(buf.view(), pool_token(&pool)).unwrap();
             let what = format!("{name} {shape:?} {layout:?}");
             assert_eq!(
                 pooled, sequential,
@@ -93,29 +90,24 @@ where
     };
 
     for full in [false, true] {
-        check_family::<T>("svd", (4, 3), general(1), &|a, par, plan| {
+        check_family::<T>("svd", (4, 3), general(1), &|a, par| {
             let (mut u, mut s, mut vt) = (Vec::new(), Vec::new(), Vec::new());
-            tlinalg::svd::svd(Op::Svd, a, full, &mut u, &mut s, &mut vt, par, plan)?;
+            tlinalg::svd::svd(Op::Svd, a, full, &mut u, &mut s, &mut vt, par)?;
             // Singular vectors are unique up to phase; compare the gauge-free `U diag(S) Vᴴ` and S.
             Ok(vec![widen(&s), reconstruct_svd(&u, &s, &vt, 4, 3, full)])
         });
     }
-    check_family::<T>(
-        "svd_values",
-        (3, 4),
-        |i| matrix::<T>(3, 4, i),
-        &|a, par, plan| {
-            let mut s = Vec::new();
-            tlinalg::svd::svd_values(Op::SvdValues, a, &mut s, par, plan)?;
-            Ok(vec![widen(&s)])
-        },
-    );
-    check_family::<T>("cholesky", (4, 4), hpd_item, &|a, par, plan| {
+    check_family::<T>("svd_values", (3, 4), |i| matrix::<T>(3, 4, i), &|a, par| {
+        let mut s = Vec::new();
+        tlinalg::svd::svd_values(Op::SvdValues, a, &mut s, par)?;
+        Ok(vec![widen(&s)])
+    });
+    check_family::<T>("cholesky", (4, 4), hpd_item, &|a, par| {
         let mut l = Vec::new();
-        tlinalg::cholesky::cholesky(Op::Cholesky, a, &mut l, par, plan)?;
+        tlinalg::cholesky::cholesky(Op::Cholesky, a, &mut l, par)?;
         Ok(vec![widen(&l)])
     });
-    check_family::<T>("lu", (4, 3), general(2), &|a, par, plan| {
+    check_family::<T>("lu", (4, 3), general(2), &|a, par| {
         let (mut p, mut l, mut u, mut parity) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let factors = tlinalg::lu::LuFactors {
             p: &mut p,
@@ -123,10 +115,10 @@ where
             u: &mut u,
             parity: &mut parity,
         };
-        tlinalg::lu::lu(Op::Lu, a, factors, par, plan)?;
+        tlinalg::lu::lu(Op::Lu, a, factors, par)?;
         Ok(vec![widen(&p), widen(&l), widen(&u), widen(&parity)])
     });
-    check_family::<T>("full_piv_lu", (4, 4), square(3), &|a, par, plan| {
+    check_family::<T>("full_piv_lu", (4, 4), square(3), &|a, par| {
         let (mut p, mut l, mut u, mut q, mut parity) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let factors = tlinalg::full_piv_lu::FullPivLuFactors {
@@ -136,7 +128,7 @@ where
             q: &mut q,
             parity: &mut parity,
         };
-        tlinalg::full_piv_lu::full_piv_lu(Op::FullPivLu, a, factors, par, plan)?;
+        tlinalg::full_piv_lu::full_piv_lu(Op::FullPivLu, a, factors, par)?;
         Ok(vec![
             widen(&p),
             widen(&l),
@@ -145,26 +137,18 @@ where
             widen(&parity),
         ])
     });
-    check_family::<T>("qr", (4, 3), general(4), &|a, par, plan| {
+    check_family::<T>("qr", (4, 3), general(4), &|a, par| {
         let (mut q, mut r) = (Vec::new(), Vec::new());
-        tlinalg::qr::qr(Op::Qr, a, &mut q, &mut r, par, plan)?;
+        tlinalg::qr::qr(Op::Qr, a, &mut q, &mut r, par)?;
         Ok(vec![widen(&q), widen(&r)])
     });
     check_family::<T>(
         "rank_revealing_qr",
         (3, 4),
         |i| matrix::<T>(3, 4, 5 + i),
-        &|a, par, plan| {
+        &|a, par| {
             let (mut q, mut r, mut perm) = (Vec::new(), Vec::new(), Vec::new());
-            tlinalg::qr::rank_revealing_qr(
-                Op::RankRevealingQr,
-                a,
-                &mut q,
-                &mut r,
-                &mut perm,
-                par,
-                plan,
-            )?;
+            tlinalg::qr::rank_revealing_qr(Op::RankRevealingQr, a, &mut q, &mut r, &mut perm, par)?;
             let perm = perm
                 .iter()
                 .map(|&p| Complex64::new(p as f64, 0.0))
@@ -172,25 +156,25 @@ where
             Ok(vec![widen(&q), widen(&r), perm])
         },
     );
-    check_family::<T>("eigh", (4, 4), herm_item, &|a, par, plan| {
+    check_family::<T>("eigh", (4, 4), herm_item, &|a, par| {
         let (mut w, mut v) = (Vec::new(), Vec::new());
-        tlinalg::eigh::eigh(Op::Eigh, a, &mut w, &mut v, par, plan)?;
+        tlinalg::eigh::eigh(Op::Eigh, a, &mut w, &mut v, par)?;
         // Eigenvectors are unique up to phase; `V diag(w) Vᴴ` is not.
         Ok(vec![widen(&w), reconstruct_eigh(&w, &v, 4)])
     });
-    check_family::<T>("eigh_values", (4, 4), herm_item, &|a, par, plan| {
+    check_family::<T>("eigh_values", (4, 4), herm_item, &|a, par| {
         let mut w = Vec::new();
-        tlinalg::eigh::eigh_values(Op::EighValues, a, &mut w, par, plan)?;
+        tlinalg::eigh::eigh_values(Op::EighValues, a, &mut w, par)?;
         Ok(vec![widen(&w)])
     });
-    check_family::<T>("eig_values", (4, 4), square(6), &|a, par, plan| {
+    check_family::<T>("eig_values", (4, 4), square(6), &|a, par| {
         let mut w = Vec::new();
-        tlinalg::eig::eig_values(Op::EigValues, a, &mut w, par, plan)?;
+        tlinalg::eig::eig_values(Op::EigValues, a, &mut w, par)?;
         Ok(vec![sorted(widen_complex::<T>(&w))])
     });
-    check_family::<T>("eig", (4, 4), square(7), &|a, par, plan| {
+    check_family::<T>("eig", (4, 4), square(7), &|a, par| {
         let (mut w, mut v) = (Vec::new(), Vec::new());
-        tlinalg::eig::eig(Op::Eig, a, &mut w, &mut v, par, plan)?;
+        tlinalg::eig::eig(Op::Eig, a, &mut w, &mut v, par)?;
         Ok(vec![widen_complex::<T>(&w), widen_complex::<T>(&v)])
     });
 }
@@ -274,14 +258,9 @@ fn a_failing_item_empties_the_vector_outputs() {
         })
         .collect();
     let buf = batch_buf(&items, n, n, &[5], Layout::Gapped);
-    for (par, plan) in [
-        (Parallel::Sequential, LanePlan::sequential()),
-        (pool_token(&pool), three_lanes()),
-        (Parallel::Sequential, three_lanes()),
-    ] {
+    for par in [Parallel::Sequential, pool_token(&pool)] {
         let mut l = vec![1.0; 7];
-        let err =
-            tlinalg::cholesky::cholesky(Op::Cholesky, buf.view(), &mut l, par, plan).unwrap_err();
+        let err = tlinalg::cholesky::cholesky(Op::Cholesky, buf.view(), &mut l, par).unwrap_err();
         assert_eq!(err, Error::NonConvergence { op: Op::Cholesky });
         assert!(l.is_empty(), "no partially written output");
     }
@@ -312,7 +291,6 @@ fn a_failing_solve_item_stops_only_its_own_lane() {
         out.view_mut(),
         false,
         pool_token(&pool),
-        three_lanes(),
     )
     .unwrap_err();
     assert_eq!(err, Error::Singular { op: Op::Solve });
@@ -341,10 +319,7 @@ fn solve_broadcasts_a_and_rejects_an_aliased_destination() {
     let (dims1, strides1) = ([n, n, 2, 2], [1, n as isize, 0, 0]);
 
     let a_view = RawStridedRef::new(&a, &dims1, &strides1, 0).unwrap();
-    for (par, plan) in [
-        (Parallel::Sequential, LanePlan::sequential()),
-        (pool_token(&pool), three_lanes()),
-    ] {
+    for par in [Parallel::Sequential, pool_token(&pool)] {
         let mut out = batch_buf(
             &vec![vec![0.0; n * 2]; 4],
             n,
@@ -359,7 +334,6 @@ fn solve_broadcasts_a_and_rejects_an_aliased_destination() {
             out.view_mut(),
             false,
             par,
-            plan,
         )
         .unwrap();
         for (i, b_item) in b_items.iter().enumerate() {
@@ -382,7 +356,6 @@ fn solve_broadcasts_a_and_rejects_an_aliased_destination() {
         RawStridedMut::new(&mut storage, &[n, 1, 2], &[1, n as isize, 0], 0).unwrap(),
         false,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument { .. }), "{err:?}");
@@ -395,7 +368,6 @@ fn solve_broadcasts_a_and_rejects_an_aliased_destination() {
         RawStridedMut::new(&mut storage, &[n, 1, 2], &[1, n as isize, 1], 0).unwrap(),
         false,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument { .. }), "{err:?}");
@@ -428,7 +400,6 @@ fn triangular_solve_broadcasts_a_and_matches_lanes() {
             flags,
             &mut seq,
             Parallel::Sequential,
-            LanePlan::sequential(),
         )
         .unwrap();
         let mut lanes = Vec::new();
@@ -439,7 +410,6 @@ fn triangular_solve_broadcasts_a_and_matches_lanes() {
             flags,
             &mut lanes,
             pool_token(&pool),
-            three_lanes(),
         )
         .unwrap();
         assert_eq!(seq, lanes);
@@ -452,7 +422,6 @@ fn triangular_solve_broadcasts_a_and_matches_lanes() {
                 flags,
                 &mut single,
                 Parallel::Sequential,
-                LanePlan::sequential(),
             )
             .unwrap();
             assert_eq!(&seq[i * rows * cols..(i + 1) * rows * cols], &single[..]);
@@ -478,7 +447,6 @@ fn full_piv_lu_solve_batches_and_broadcasts() {
         false,
         &mut seq,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     let mut lanes = Vec::new();
@@ -489,7 +457,6 @@ fn full_piv_lu_solve_batches_and_broadcasts() {
         false,
         &mut lanes,
         pool_token(&pool),
-        three_lanes(),
     )
     .unwrap();
     assert_eq!(seq, lanes);
@@ -511,45 +478,25 @@ fn packed_lu_lanes_match_and_prepared_solve_broadcasts() {
     let n = 3;
     let batch = 5;
     let a: Vec<f64> = (0..batch).flat_map(|i| matrix::<f64>(n, n, i)).collect();
-    let run_factor = |par, plan| {
+    let run_factor = |par| {
         let (mut lu, mut piv, mut parity) = (a.clone(), vec![0; n * batch], vec![0.0; batch]);
-        factor(
-            Op::LuFactor,
-            n,
-            n,
-            &mut lu,
-            &mut piv,
-            &mut parity,
-            par,
-            plan,
-        )
-        .unwrap();
+        factor(Op::LuFactor, n, n, &mut lu, &mut piv, &mut parity, par).unwrap();
         (lu, piv, parity)
     };
-    let sequential = run_factor(Parallel::Sequential, LanePlan::sequential());
-    assert_eq!(run_factor(pool_token(&pool), three_lanes()), sequential);
+    let sequential = run_factor(Parallel::Sequential);
+    assert_eq!(run_factor(pool_token(&pool)), sequential);
 
     let b: Vec<f64> = (0..batch)
         .flat_map(|i| matrix::<f64>(n, 2, 10 + i))
         .collect();
-    let run_fused = |par, plan| {
+    let run_fused = |par| {
         let (mut lu, mut piv, mut x) = (a.clone(), vec![0; n * batch], b.clone());
-        factor_solve(
-            Op::LuFactorSolve,
-            n,
-            2,
-            &mut lu,
-            &mut piv,
-            &mut x,
-            par,
-            plan,
-        )
-        .unwrap();
+        factor_solve(Op::LuFactorSolve, n, 2, &mut lu, &mut piv, &mut x, par).unwrap();
         x
     };
     assert_eq!(
-        run_fused(pool_token(&pool), three_lanes()),
-        run_fused(Parallel::Sequential, LanePlan::sequential())
+        run_fused(pool_token(&pool)),
+        run_fused(Parallel::Sequential)
     );
 
     // Broadcast item 0's factors (stride 0) over every right-hand side.
@@ -560,7 +507,7 @@ fn packed_lu_lanes_match_and_prepared_solve_broadcasts() {
     let (dims5, strides5) = ([n, batch], [1, 0]);
 
     let piv_view = RawStridedRef::new(&piv[..n], &dims5, &strides5, 0).unwrap();
-    let solve = |par, plan| {
+    let solve = |par| {
         let mut x = b.clone();
         solve_prepared(
             Op::LuSolvePrepared,
@@ -571,13 +518,12 @@ fn packed_lu_lanes_match_and_prepared_solve_broadcasts() {
             false,
             false,
             par,
-            plan,
         )
         .unwrap();
         x
     };
-    let x = solve(Parallel::Sequential, LanePlan::sequential());
-    assert_eq!(solve(pool_token(&pool), three_lanes()), x);
+    let x = solve(Parallel::Sequential);
+    assert_eq!(solve(pool_token(&pool)), x);
     let a0 = widen(&a[..n * n]);
     for i in 0..batch {
         let xi = widen(&x[i * n * 2..(i + 1) * n * 2]);
@@ -598,7 +544,7 @@ fn householder_lanes_match() {
     let a: Vec<Complex64> = (0..batch)
         .flat_map(|i| matrix::<Complex64>(rows, cols, i))
         .collect();
-    let run = |par, plan| {
+    let run = |par| {
         let (mut data, mut coeff) = (a.clone(), Vec::new());
         compact_factor(
             Op::HouseholderQr,
@@ -608,7 +554,6 @@ fn householder_lanes_match() {
             &mut data,
             &mut coeff,
             par,
-            plan,
         )
         .unwrap();
         let mut c: Vec<Complex64> = (0..batch)
@@ -629,13 +574,12 @@ fn householder_lanes_match() {
             &mut c,
             false,
             par,
-            plan,
         )
         .unwrap();
         (data, coeff, c)
     };
-    let sequential = run(Parallel::Sequential, LanePlan::sequential());
-    assert_eq!(run(pool_token(&pool), three_lanes()), sequential);
+    let sequential = run(Parallel::Sequential);
+    assert_eq!(run(pool_token(&pool)), sequential);
     assert_eq!(sequential.1.len(), batch * cols);
 }
 
@@ -643,18 +587,18 @@ fn householder_lanes_match() {
 /// output empty, so a host recycling a pooled buffer never reads a previous call's values.
 #[test]
 fn a_rejected_argument_still_empties_the_outputs() {
-    let (par, plan) = (Parallel::Sequential, LanePlan::sequential());
+    let par = Parallel::Sequential;
 
     // `cholesky` requires a square input.
     let a = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
     let view = || RawStridedRef::new(&a, &[2, 3], &[1, 2], 0).unwrap();
     let mut l = vec![7.0; 4];
-    assert!(tlinalg::cholesky::cholesky(Op::Cholesky, view(), &mut l, par, plan).is_err());
+    assert!(tlinalg::cholesky::cholesky(Op::Cholesky, view(), &mut l, par).is_err());
     assert!(l.is_empty(), "cholesky");
 
     // The same rejection must clear every output of a multi-output family at once.
     let (mut values, mut vectors) = (vec![7.0; 4], vec![7.0; 4]);
-    assert!(tlinalg::eigh::eigh(Op::Eigh, view(), &mut values, &mut vectors, par, plan).is_err());
+    assert!(tlinalg::eigh::eigh(Op::Eigh, view(), &mut values, &mut vectors, par).is_err());
     assert!(values.is_empty() && vectors.is_empty(), "eigh");
 
     // A batch-shape mismatch is checked before the driver too.
@@ -674,7 +618,6 @@ fn a_rejected_argument_still_empties_the_outputs() {
             },
             &mut x,
             par,
-            plan,
         )
         .is_err(),
         "triangular_solve"
@@ -693,7 +636,6 @@ fn a_rejected_argument_still_empties_the_outputs() {
             &mut state,
             &mut coeff,
             par,
-            plan,
         )
         .is_err(),
         "compact_factor"
@@ -710,7 +652,6 @@ fn rank_below_two_is_rejected() {
         RawStridedRef::new(&a, &[3], &[1], 0).unwrap(),
         &mut l,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument { .. }));

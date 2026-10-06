@@ -1,7 +1,7 @@
 //! Fixtures for the kernel-level benchmarks in `benches/kernels.rs`.
 //!
 //! The benchmarks call each provider's batched entry points directly, the way a host does after it
-//! has resolved its lane plan: inputs are compact `[n, n, batch]` descriptors, output vectors are
+//! has selected its execution pool: inputs are compact `[n, n, batch]` descriptors, output vectors are
 //! reused across iterations (a host hands back pooled buffers), and the LAPACK provider gets a
 //! recycling [`Workspace`], so steady-state allocation is not what is measured.
 //!
@@ -70,20 +70,6 @@ impl Env {
         tlinalg::Parallel::Pool {
             pool: &self.pool,
             budget: self.threads,
-        }
-    }
-
-    /// The plan a host would resolve for `batch` items on this pool: one lane per worker (up to
-    /// the batch) with sequential items when there is more than one item, otherwise a single lane
-    /// whose item may use the whole pool.
-    pub fn plan(&self, batch: usize) -> tlinalg::LanePlan<'_> {
-        if batch > 1 && self.threads.get() > 1 {
-            tlinalg::LanePlan {
-                lanes: self.threads.get().min(batch),
-                item_parallel: tlinalg::Parallel::Sequential,
-            }
-        } else {
-            tlinalg::LanePlan::single(self.par())
         }
     }
 }

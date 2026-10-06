@@ -17,7 +17,7 @@ use strided_view::RawStridedRef;
 use crate::batch::{self, out, BatchedRef};
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, push_mat};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// Lane scratch for `n x n` Hermitian eigendecompositions.
 struct EighScratch<E: faer::traits::ComplexField> {
@@ -86,13 +86,13 @@ fn decompose<E: faer::traits::ComplexField>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{eigh::eigh_values, LanePlan, Op, Parallel};
+/// use tlinalg::{eigh::eigh_values, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 1.0];
 /// let mut w = Vec::new();
 /// eigh_values(
 ///     Op::EighValues, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w,
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(w, [1.0, 2.0]);
 /// ```
@@ -101,7 +101,6 @@ pub fn eigh_values<T: FaerScalar>(
     input: RawStridedRef<'_, T>,
     values: &mut Vec<<T as ScalarEntity>::Real>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     values.clear();
     let input = BatchedRef::square(op, "input", input)?;
@@ -110,7 +109,7 @@ pub fn eigh_values<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(n),
         &mut (out(values, n),),
         |par| EighScratch::<T::Entity>::new(n, ComputeEigenvectors::No, par),
         |index, (values,), scratch, par| {
@@ -142,13 +141,13 @@ pub fn eigh_values<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{eigh::eigh, LanePlan, Op, Parallel};
+/// use tlinalg::{eigh::eigh, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 1.0];
 /// let (mut w, mut v) = (Vec::new(), Vec::new());
 /// eigh(
 ///     Op::Eigh, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut w, &mut v,
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(w, [1.0, 2.0]);
 /// assert_eq!(v.len(), 4);
@@ -159,7 +158,6 @@ pub fn eigh<T: FaerScalar>(
     values: &mut Vec<T>,
     vectors: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     values.clear();
     vectors.clear();
@@ -170,7 +168,7 @@ pub fn eigh<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(n),
         &mut (out(values, n), out(vectors, v_len)),
         |par| EighScratch::<T::Entity>::new(n, ComputeEigenvectors::Yes, par),
         |index, (values, vectors), scratch, par| {

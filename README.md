@@ -23,8 +23,8 @@ ever a `[dev-dependencies]` entry of a provider).
 `tlinalg` is the faer-backed provider. It owns batched kernels (SVD, packed LU, Cholesky,
 triangular solve, LU and solve, full-pivot LU, QR and column-pivoted QR, Hermitian and general
 eigendecompositions, compact Householder QR), the batch loop and lane fan-out over them, and the
-vocabulary its entry points take: borrowed strided I/O, parallelism (`Parallel`), lane policy
-(`LanePlan`) and typed errors (`Error`). No tensor types.
+vocabulary its entry points take: borrowed strided I/O, one resource token (`Parallel`) and typed
+errors (`Error`). Auto lane policy belongs to the library; no tensor types.
 
 `tlinalg-blas` has the same batched shape without a parallelism token: LAPACK and BLAS own their
 threading, the batch loop is serial, and scratch comes from a host `Workspace`, queried and acquired
@@ -44,7 +44,8 @@ The crate documentation is the specification for the rest:
 
 * numerical conventions and failure behaviour — crate root of `tlinalg`;
 * the parallelism and budget contract — `tlinalg::Parallel`;
-* the batch lane contract — `tlinalg::LanePlan`;
+* library-owned Auto lanes and the accepted faer count-hint limitation —
+  [`docs/design/library-owned-lanes.md`](docs/design/library-owned-lanes.md);
 * output assembly and lane scratch — `docs/design/batched-api.md`;
 * the error vocabulary — `tlinalg::Error`.
 
@@ -82,8 +83,8 @@ provider's documented convention.
 
 ## Benchmarks
 
-`tlinalg-bench` measures the providers' batched entry points directly, as a host calls them after
-resolving its lane plan: compact inputs, output vectors reused across iterations, and a recycling
+`tlinalg-bench` measures the ordinary single-token batched entry points directly: compact inputs,
+output vectors reused across iterations, and a recycling
 LAPACK workspace, so steady-state allocation is not what is timed.
 
 ```sh
@@ -99,9 +100,10 @@ and `n = 32, 128, 512` single matrices) and `t64x24` (a tall matrix, SVD and QR)
 to three rows:
 
 * `faer-1lane` — one sequential lane: per-item cost plus the batch loop, no threading.
-* `faer-{N}t` — the plan a host resolves on an `N`-worker pool (`TLINALG_BENCH_THREADS`, default
-  the available parallelism): `min(N, batch)` lanes over a batch, or a single matrix given the
-  whole pool for faer's internal parallelism.
+* `faer-{N}t` — an explicit `N`-worker pool and requested budget (`TLINALG_BENCH_THREADS`,
+  default the available parallelism); tlinalg's ordinary Auto policy chooses outer lanes or
+  faer's intra-item count hint. Use `TLINALG_BENCH_THREADS=1` for overhead baselines.
+  **The faer hint is not a hard active-thread limit**; see the `Parallel` budget contract.
 * `lapack` — `tlinalg-blas` (with `--features link-openblas`): a serial batch loop, vendor-owned
   threading.
 
@@ -110,8 +112,7 @@ comparison; with OpenBLAS's default thread count, small LAPACK calls pay its thr
 which says more about the vendor configuration than the kernel. `faer-{N}t` against `faer-1lane`
 shows what lane fan-out buys for a batch and what intra-item parallelism costs or buys for one
 matrix. These are kernel numbers only: tensor construction, dtype dispatch, session entry and pool
-checkout belong to tenferro, and route-level performance (including the lane policy tenferro
-chooses) lives in [`tenferro-benchmark`](https://github.com/tensor4all/tenferro-benchmark).
+checkout belong to tenferro, and integrated route-level performance lives in [`tenferro-benchmark`](https://github.com/tensor4all/tenferro-benchmark).
 
 ## License
 

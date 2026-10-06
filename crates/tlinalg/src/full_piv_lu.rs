@@ -13,7 +13,7 @@ use strided_view::RawStridedRef;
 use crate::batch::{self, out, same_batch, BatchedRef, Push, Sink};
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, invalid, push_masked, push_permutation};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// The explicit factors of a batch of full-pivot LU decompositions, as caller-provided buffers.
 ///
@@ -125,7 +125,7 @@ fn full_piv_lu_item<T: FaerScalar>(
 /// ```
 /// use strided_view::RawStridedRef;
 /// use tlinalg::full_piv_lu::{full_piv_lu, FullPivLuFactors};
-/// use tlinalg::{LanePlan, Op, Parallel};
+/// use tlinalg::{Op, Parallel};
 ///
 /// let a = [1.0_f64, 0.0, 0.0, 2.0];
 /// let (mut p, mut l, mut u, mut q, mut parity) =
@@ -133,7 +133,7 @@ fn full_piv_lu_item<T: FaerScalar>(
 /// full_piv_lu(
 ///     Op::FullPivLu, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
 ///     FullPivLuFactors { p: &mut p, l: &mut l, u: &mut u, q: &mut q, parity: &mut parity },
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(u[0], 2.0);
 /// ```
@@ -142,7 +142,6 @@ pub fn full_piv_lu<T: FaerScalar>(
     input: RawStridedRef<'_, T>,
     factors: FullPivLuFactors<'_, T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let FullPivLuFactors { p, l, u, q, parity } = factors;
     p.clear();
@@ -157,7 +156,7 @@ pub fn full_piv_lu<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(n),
         &mut (
             out(p, len),
             out(l, len),
@@ -252,7 +251,7 @@ fn full_piv_lu_solve_item<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{full_piv_lu::full_piv_lu_solve, LanePlan, Op, Parallel};
+/// use tlinalg::{full_piv_lu::full_piv_lu_solve, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 4.0];
 /// let b = [2.0_f64, 8.0];
@@ -261,11 +260,11 @@ fn full_piv_lu_solve_item<T: FaerScalar>(
 ///     Op::FullPivLuSolve,
 ///     RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
 ///     RawStridedRef::new(&b, &[2, 1], &[1, 2], 0).unwrap(),
-///     false, &mut x, Parallel::Sequential, LanePlan::sequential(),
+///     false, &mut x, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(x, [1.0, 2.0]);
 /// ```
-// INVARIANT: coefficient, right-hand side, transpose flag, output, token and plan are distinct
+// INVARIANT: coefficient, right-hand side, transpose flag, output, token are distinct
 // operands of the batched solve.
 #[allow(clippy::too_many_arguments)]
 pub fn full_piv_lu_solve<T: FaerScalar>(
@@ -275,7 +274,6 @@ pub fn full_piv_lu_solve<T: FaerScalar>(
     transpose_a: bool,
     x: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     x.clear();
     let a = BatchedRef::square(op, "A", a)?;
@@ -295,7 +293,7 @@ pub fn full_piv_lu_solve<T: FaerScalar>(
         op,
         a.batch(),
         par,
-        plan,
+        Some(n.max(nrhs)),
         &mut (out(x, x_len),),
         |par| {
             (

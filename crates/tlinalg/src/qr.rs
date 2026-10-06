@@ -16,7 +16,7 @@ use strided_view::RawStridedRef;
 
 use crate::batch::{self, out, BatchedRef, Push, Sink};
 use crate::util::{checked_product, invalid, push_masked, push_mat};
-use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{FaerScalar, Op, Parallel, Result};
 
 /// Lane scratch for `m x n` QR factorizations, plain or column-pivoted.
 struct QrScratch<E: faer::traits::ComplexField> {
@@ -209,13 +209,13 @@ fn rank_revealing_qr_item<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{qr::qr, LanePlan, Op, Parallel};
+/// use tlinalg::{qr::qr, Op, Parallel};
 ///
 /// let a = [3.0_f64, 4.0];
 /// let (mut q, mut r) = (Vec::new(), Vec::new());
 /// qr(
 ///     Op::Qr, RawStridedRef::new(&a, &[2, 1], &[1, 2], 0).unwrap(), &mut q, &mut r,
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert!((r[0].abs() - 5.0).abs() < 1e-12);
 /// ```
@@ -225,7 +225,6 @@ pub fn qr<T: FaerScalar>(
     q: &mut Vec<T>,
     r: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     q.clear();
     r.clear();
@@ -238,7 +237,7 @@ pub fn qr<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(m.max(n)),
         &mut (out(q, q_len), out(r, r_len)),
         |par| QrScratch::<T::Entity>::new(m, n, false, par),
         |index, (q, r), scratch, par| {
@@ -284,13 +283,13 @@ pub fn magnitude<T: FaerScalar>(value: T) -> f64 {
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{qr::rank_revealing_qr, LanePlan, Op, Parallel};
+/// use tlinalg::{qr::rank_revealing_qr, Op, Parallel};
 ///
 /// let a = [1.0_f64, 0.0, 0.0, 5.0];
 /// let (mut q, mut r, mut perm) = (Vec::new(), Vec::new(), Vec::new());
 /// rank_revealing_qr(
 ///     Op::RankRevealingQr, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
-///     &mut q, &mut r, &mut perm, Parallel::Sequential, LanePlan::sequential(),
+///     &mut q, &mut r, &mut perm, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(perm, [1, 0]);
 /// ```
@@ -301,7 +300,6 @@ pub fn rank_revealing_qr<T: FaerScalar>(
     r: &mut Vec<T>,
     permutation: &mut Vec<i64>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     q.clear();
     r.clear();
@@ -315,7 +313,7 @@ pub fn rank_revealing_qr<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(m.max(n)),
         &mut (out(q, q_len), out(r, r_len), out(permutation, n)),
         |par| QrScratch::<T::Entity>::new(m, n, true, par),
         |index, (q, r, permutation), scratch, par| {

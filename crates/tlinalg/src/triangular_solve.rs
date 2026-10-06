@@ -20,7 +20,7 @@ use strided_view::RawStridedRef;
 
 use crate::batch::{self, out, same_batch, BatchedRef, Sink};
 use crate::util::invalid;
-use crate::{FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{FaerScalar, Op, Parallel, Result};
 
 /// Which triangle and which variant of the coefficient matrix a triangular solve uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +122,7 @@ fn triangular_solve_item<T: FaerScalar>(
 /// ```
 /// use strided_view::RawStridedRef;
 /// use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
-/// use tlinalg::{LanePlan, Op, Parallel};
+/// use tlinalg::{Op, Parallel};
 ///
 /// // Lower-triangular A = [[2, 0], [1, 1]], B = [2, 3].
 /// let a = [2.0_f64, 1.0, 0.0, 1.0];
@@ -133,7 +133,7 @@ fn triangular_solve_item<T: FaerScalar>(
 ///     Op::TriangularSolve,
 ///     RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
 ///     RawStridedRef::new(&b, &[2, 1], &[1, 2], 0).unwrap(),
-///     flags, &mut x, Parallel::Sequential, LanePlan::sequential(),
+///     flags, &mut x, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(x, [1.0, 2.0]);
 /// ```
@@ -144,7 +144,6 @@ pub fn triangular_solve<T: FaerScalar>(
     flags: TriangularSolveFlags,
     x: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     x.clear();
     let a = BatchedRef::square(op, "A", a)?;
@@ -176,7 +175,7 @@ pub fn triangular_solve<T: FaerScalar>(
         op,
         a.batch(),
         par,
-        plan,
+        Some(n.max(b_rows).max(b_cols)),
         &mut (out(x, item_len),),
         // Only the right-side route needs a work matrix; an empty `Mat` does not allocate.
         |_| {

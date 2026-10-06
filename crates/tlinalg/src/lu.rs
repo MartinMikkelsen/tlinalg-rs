@@ -13,7 +13,7 @@ use strided_view::{RawStridedMut, RawStridedRef};
 
 use crate::batch::{self, out, same_batch, BatchedMut, BatchedRef};
 use crate::util::{checked_product, invalid, push_masked, push_permutation};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// The explicit factors of a batch of partial-pivot LU decompositions, as caller-provided buffers.
 ///
@@ -118,14 +118,14 @@ fn lu_item<T: FaerScalar>(
 /// ```
 /// use strided_view::RawStridedRef;
 /// use tlinalg::lu::{lu, LuFactors};
-/// use tlinalg::{LanePlan, Op, Parallel};
+/// use tlinalg::{Op, Parallel};
 ///
 /// let a = [1.0_f64, 3.0, 2.0, 4.0];
 /// let (mut p, mut l, mut u, mut parity) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
 /// lu(
 ///     Op::Lu, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
 ///     LuFactors { p: &mut p, l: &mut l, u: &mut u, parity: &mut parity },
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(parity, [-1.0]);
 /// assert_eq!(u[0], 3.0);
@@ -135,7 +135,6 @@ pub fn lu<T: FaerScalar>(
     input: RawStridedRef<'_, T>,
     factors: LuFactors<'_, T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let LuFactors { p, l, u, parity } = factors;
     p.clear();
@@ -152,7 +151,7 @@ pub fn lu<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(m.max(n)),
         &mut (out(p, p_len), out(l, l_len), out(u, u_len), out(parity, 1)),
         |par| LuScratch::<T::Entity>::new(m, n, par),
         |index, (p, l, u, parity), scratch, par| {
@@ -232,7 +231,7 @@ fn solve_item<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::{RawStridedMut, RawStridedRef};
-/// use tlinalg::{lu::solve, LanePlan, Op, Parallel};
+/// use tlinalg::{lu::solve, Op, Parallel};
 ///
 /// let a = [2.0_f64, 0.0, 0.0, 4.0];
 /// let b = [2.0_f64, 8.0];
@@ -242,11 +241,11 @@ fn solve_item<T: FaerScalar>(
 ///     RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(),
 ///     Some(RawStridedRef::new(&b, &[2, 1], &[1, 2], 0).unwrap()),
 ///     RawStridedMut::new(&mut x, &[2, 1], &[1, 2], 0).unwrap(),
-///     false, Parallel::Sequential, LanePlan::sequential(),
+///     false, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(x, [1.0, 2.0]);
 /// ```
-// INVARIANT: coefficient, optional source, destination, transpose flag, token and plan are
+// INVARIANT: coefficient, optional source, destination, transpose flag, token are
 // distinct operands of the batched solve.
 #[allow(clippy::too_many_arguments)]
 pub fn solve<T: FaerScalar>(
@@ -256,7 +255,6 @@ pub fn solve<T: FaerScalar>(
     mut out: RawStridedMut<'_, T>,
     transpose_a: bool,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let a = BatchedRef::square(op, "A", a)?;
     let destination = BatchedMut::new(op, "out", &mut out)?;
@@ -289,7 +287,7 @@ pub fn solve<T: FaerScalar>(
         op,
         a.batch(),
         par,
-        plan,
+        Some(n.max(nrhs)),
         &mut (),
         |par| {
             let solve_req = if transpose_a {

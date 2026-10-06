@@ -26,7 +26,7 @@ use faer::{Conj, Mat, MatMut, MatRef};
 
 use crate::batch::{self, in_place, out, Push};
 use crate::util::{checked_product, invalid};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// The faer entity one, the implicit head of every stored reflector.
 fn head_one<T: FaerScalar>() -> T::Entity {
@@ -122,17 +122,17 @@ fn compact_factor_item<T: FaerScalar>(
 /// # Examples
 ///
 /// ```
-/// use tlinalg::{householder::compact_factor, LanePlan, Op, Parallel};
+/// use tlinalg::{householder::compact_factor, Op, Parallel};
 ///
 /// let mut a = [3.0_f64, 4.0];
 /// let mut coeff = Vec::new();
 /// compact_factor(
-///     Op::HouseholderQr, 2, 1, 1, &mut a, &mut coeff, Parallel::Sequential, LanePlan::sequential(),
+///     Op::HouseholderQr, 2, 1, 1, &mut a, &mut coeff, Parallel::Sequential,
 /// ).unwrap();
 /// assert!((a[0].abs() - 5.0).abs() < 1e-12);
 /// assert_eq!(coeff.len(), 1);
 /// ```
-// INVARIANT: shape, batch, state buffer, coefficients, token and plan are distinct operands.
+// INVARIANT: shape, batch, state buffer, coefficients, token are distinct operands.
 #[allow(clippy::too_many_arguments)]
 pub fn compact_factor<T: FaerScalar>(
     op: Op,
@@ -142,7 +142,6 @@ pub fn compact_factor<T: FaerScalar>(
     data: &mut [T],
     coeff: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     coeff.clear();
     let matrix_len = checked_product(op, "matrix", &[rows, cols])?;
@@ -150,7 +149,7 @@ pub fn compact_factor<T: FaerScalar>(
         op,
         batch,
         par,
-        plan,
+        Some(rows.max(cols)),
         &mut (
             in_place(data, matrix_len, "matrix"),
             out(coeff, rows.min(cols)),
@@ -191,17 +190,16 @@ pub struct ReflectorShape {
 ///
 /// ```
 /// use tlinalg::householder::{apply_reflectors, compact_factor, ReflectorShape};
-/// use tlinalg::{LanePlan, Op, Parallel};
+/// use tlinalg::{Op, Parallel};
 ///
 /// let mut a = [3.0_f64, 4.0];
 /// let mut coeff = Vec::new();
-/// let plan = LanePlan::sequential();
-/// compact_factor(Op::HouseholderQr, 2, 1, 1, &mut a, &mut coeff, Parallel::Sequential, plan).unwrap();
+/// compact_factor(Op::HouseholderQr, 2, 1, 1, &mut a, &mut coeff, Parallel::Sequential).unwrap();
 /// // Q applied to e1 is the first column of Q, which is ±(3, 4)/5.
 /// let mut c = [1.0_f64, 0.0];
 /// let shape = ReflectorShape { rows: 2, a_cols: 1, cols: 1, k: 1 };
 /// apply_reflectors(
-///     Op::HouseholderQrQColumns, shape, 1, &a, &coeff, &mut c, false, Parallel::Sequential, plan,
+///     Op::HouseholderQrQColumns, shape, 1, &a, &coeff, &mut c, false, Parallel::Sequential,
 /// ).unwrap();
 /// assert!((c[0].abs() - 0.6).abs() < 1e-12);
 /// ```
@@ -216,7 +214,6 @@ pub fn apply_reflectors<T: FaerScalar>(
     c: &mut [T],
     transpose: bool,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let ReflectorShape {
         rows,
@@ -246,7 +243,7 @@ pub fn apply_reflectors<T: FaerScalar>(
         op,
         batch,
         par,
-        plan,
+        Some(rows.max(a_cols).max(cols)),
         &mut (in_place(c, c_len, "C"),),
         |_| {
             let req = if !apply {

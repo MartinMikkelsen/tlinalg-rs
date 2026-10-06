@@ -7,7 +7,7 @@
 
 use strided_view::{RawStridedMut, RawStridedRef};
 use tlinalg::triangular_solve::{triangular_solve, TriangularSolveFlags};
-use tlinalg::{LanePlan, Op, Parallel};
+use tlinalg::{Op, Parallel};
 use tlinalg_testkit::alloc::{steady, Counting};
 
 #[global_allocator]
@@ -33,7 +33,7 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
     let a = batch_of(n, batch);
     let (dims, strides) = ([n, n, batch], [1, n as isize, (n * n) as isize]);
     let view = RawStridedRef::new(&a, &dims, &strides, 0).unwrap();
-    let (seq, plan) = (Parallel::Sequential, LanePlan::sequential());
+    let seq = Parallel::Sequential;
     let cap = n * n * batch;
     let (mut v1, mut v2, mut v3) = (
         Vec::with_capacity(cap),
@@ -41,42 +41,25 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
         Vec::with_capacity(cap),
     );
     let cholesky = steady(|| {
-        tlinalg::cholesky::cholesky(Op::Cholesky, view, &mut v1, seq, plan).unwrap();
+        tlinalg::cholesky::cholesky(Op::Cholesky, view, &mut v1, seq).unwrap();
     });
-    let qr = steady(|| tlinalg::qr::qr(Op::Qr, view, &mut v1, &mut v2, seq, plan).unwrap());
+    let qr = steady(|| tlinalg::qr::qr(Op::Qr, view, &mut v1, &mut v2, seq).unwrap());
     let eigh = steady(|| {
-        tlinalg::eigh::eigh(Op::Eigh, view, &mut v1, &mut v2, seq, plan).unwrap();
+        tlinalg::eigh::eigh(Op::Eigh, view, &mut v1, &mut v2, seq).unwrap();
     });
     let svd = steady(|| {
-        tlinalg::svd::svd(Op::Svd, view, false, &mut v1, &mut v2, &mut v3, seq, plan).unwrap();
+        tlinalg::svd::svd(Op::Svd, view, false, &mut v1, &mut v2, &mut v3, seq).unwrap();
     });
     let (mut lu, mut piv, mut parity) = (a.clone(), vec![0; n * batch], vec![0.0; batch]);
     let packed_lu = steady(|| {
         lu.copy_from_slice(&a);
-        tlinalg::packed_lu::factor(
-            Op::LuFactor,
-            n,
-            n,
-            &mut lu,
-            &mut piv,
-            &mut parity,
-            seq,
-            plan,
-        )
-        .unwrap();
+        tlinalg::packed_lu::factor(Op::LuFactor, n, n, &mut lu, &mut piv, &mut parity, seq)
+            .unwrap();
     });
     let mut perm = Vec::with_capacity(n * batch);
     let rrqr = steady(|| {
-        tlinalg::qr::rank_revealing_qr(
-            Op::RankRevealingQr,
-            view,
-            &mut v1,
-            &mut v2,
-            &mut perm,
-            seq,
-            plan,
-        )
-        .unwrap();
+        tlinalg::qr::rank_revealing_qr(Op::RankRevealingQr, view, &mut v1, &mut v2, &mut perm, seq)
+            .unwrap();
     });
     let b = batch_of(n, batch);
     let b_view = RawStridedRef::new(&b, &dims, &strides, 0).unwrap();
@@ -89,7 +72,6 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
             RawStridedMut::new(&mut x, &dims, &strides, 0).unwrap(),
             false,
             seq,
-            plan,
         )
         .unwrap();
     });
@@ -101,7 +83,6 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
             false,
             &mut v1,
             seq,
-            plan,
         )
         .unwrap();
     });
@@ -116,7 +97,6 @@ fn family_counts(batch: usize) -> [(&'static str, usize); 11] {
             &mut state,
             &mut coeff,
             seq,
-            plan,
         )
         .unwrap();
     });
@@ -166,7 +146,6 @@ fn triangular(left_side: bool, batch: usize) -> usize {
             flags,
             &mut x,
             Parallel::Sequential,
-            LanePlan::sequential(),
         )
         .unwrap();
     })

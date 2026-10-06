@@ -208,7 +208,7 @@ fn householder_rejects_bad_dimensions() {
 
 #[test]
 fn rank_revealing_qr_returns_the_identity_for_an_all_zero_item() {
-    use tlinalg::{LanePlan, Parallel};
+    use tlinalg::Parallel;
     // Item 0 is zero, item 1 is not: the zero item is not factored, the other is.
     let (m, n) = (3, 4);
     let mut a = vec![0.0_f64; m * n];
@@ -221,7 +221,6 @@ fn rank_revealing_qr_returns_the_identity_for_an_all_zero_item() {
         &mut r,
         &mut perm,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     let k = m.min(n);
