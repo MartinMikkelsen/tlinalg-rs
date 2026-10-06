@@ -1,52 +1,68 @@
-//! Parallelism handed to a numerical implementation.
-//!
-//! A host decides parallelism; an implementation consumes it. Implementations must not read global
-//! or ambient state to discover how many threads they may use.
+//! The host supplies a resource; tlinalg decides batch lanes and requested faer parallelism.
+//! No global or ambient pool is selected.
 
 use core::num::NonZeroUsize;
-
 use rayon::ThreadPool;
 
-/// The parallelism an implementation may use for one call.
+/// The caller-owned numerical resource for one call.
 ///
-/// [`Parallel::Sequential`] means "no implementation-owned parallelism": run the work on the
-/// calling thread, equivalent to a sequential provider policy. It is not "one thread of some pool".
-///
-/// [`Parallel::Pool`] names the pool the host has already installed the call in, together with the
-/// thread budget for this call.
+/// [`Parallel::Sequential`] runs on the calling thread without implementation-owned fan-out.
+/// [`Parallel::Pool`] names a pool and requested budget; the caller need not enter it first.
 ///
 /// # Budget contract
 ///
-/// `budget` is an upper bound the **implementation** must honour for the parallelism it starts
-/// itself. Selecting the pool does not impose it: `ThreadPool::install` runs work on that pool, and
-/// the pool may be larger than `budget`. Work the implementation fans out over — over the items of
-/// one chunk, say — must fit in `budget` threads (a count-based provider policy already does so).
+/// tlinalg resolves outer batch lanes using `min(budget, pool.current_num_threads())`. Their count
+/// never exceeds that width, and their items are sequential. Otherwise one lane passes the
+/// effective width to faer on the supplied pool. Effective width one runs on the calling thread
+/// without entering a pool.
 ///
-/// The batch's outer fan-out is not the implementation's to bound or to re-derive: it is the number
-/// of tasks the host asked for in [`crate::LanePlan`], which the host resolves from this same
-/// budget. A batched entry point runs exactly that many tasks.
+/// **faer's count is a hint, not a strict active-thread bound.** faer 0.24.4 can expose more
+/// intra-item numerical tasks than requested (wide-RHS recursion and rounded-up split counts).
+/// `budget` bounds tlinalg's outer lanes and the count requested from faer, not every active native
+/// numerical thread. Admission across simultaneous calls belongs to the resource owner.
+/// Vendor BLAS/LAPACK threading is outside this token's contract.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// use tlinalg::Parallel;
-/// assert!(matches!(Parallel::Sequential, Parallel::Sequential));
+/// assert_eq!(Parallel::Sequential.budget().get(), 1);
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub enum Parallel<'a> {
     /// Run on the calling thread with no implementation-owned parallelism.
     Sequential,
-    /// Run on `pool`, using at most `budget` threads.
+    /// Use `pool`; bound outer lanes by `budget` and pass it as a faer count hint.
     Pool {
-        /// Pool the host has already entered for this call.
+        /// Caller-owned pool selected for numerical execution.
         pool: &'a ThreadPool,
-        /// Maximum threads this call may use.
+        /// Outer-lane ceiling and requested intra-item count; see the budget contract.
         budget: NonZeroUsize,
     },
 }
 
 impl Parallel<'_> {
-    /// The thread budget, or `1` for [`Parallel::Sequential`].
+    /// Clamp the request to the named pool and avoid pool entry at effective width one.
+    pub(crate) fn bounded(self) -> Self {
+        match self {
+            Self::Pool { pool, budget } => {
+                let width = budget.get().min(pool.current_num_threads());
+                match NonZeroUsize::new(width).filter(|width| width.get() > 1) {
+                    Some(budget) => Self::Pool { pool, budget },
+                    None => Self::Sequential,
+                }
+            }
+            Self::Sequential => Self::Sequential,
+        }
+    }
+
+    /// The caller's requested budget (not pool-clamped), or `1` for [`Parallel::Sequential`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(tlinalg::Parallel::Sequential.budget().get(), 1);
+    /// ```
     #[must_use]
     pub fn budget(self) -> NonZeroUsize {
         match self {

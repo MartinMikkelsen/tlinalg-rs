@@ -7,11 +7,7 @@
 use strided_view::{RawStridedMut, RawStridedRef};
 use tlinalg::householder::ReflectorShape;
 use tlinalg::triangular_solve::TriangularSolveFlags;
-use tlinalg::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
-
-fn plan(par: Parallel<'_>) -> LanePlan<'_> {
-    LanePlan::single(par)
-}
+use tlinalg::{Error, FaerScalar, Op, Parallel, Result};
 
 fn length_error(op: Op) -> Error {
     Error::InvalidArgument {
@@ -28,7 +24,7 @@ pub fn cholesky<T: FaerScalar>(
     l: &mut Vec<T>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::cholesky::cholesky(op, input, l, par, plan(par))
+    tlinalg::cholesky::cholesky(op, input, l, par)
 }
 
 pub fn triangular_solve<T: FaerScalar, W: ?Sized>(
@@ -49,7 +45,7 @@ pub fn triangular_solve<T: FaerScalar, W: ?Sized>(
     let strides = [1, b_rows as isize];
     let b = RawStridedRef::new(&rhs, &dims, &strides, 0).unwrap();
     let mut x = Vec::new();
-    tlinalg::triangular_solve::triangular_solve(op, a, b, flags, &mut x, par, plan(par))?;
+    tlinalg::triangular_solve::triangular_solve(op, a, b, flags, &mut x, par)?;
     Ok(x)
 }
 
@@ -78,7 +74,6 @@ pub fn lu<T: FaerScalar>(
             parity: &mut parity,
         },
         par,
-        plan(par),
     )?;
     Ok(parity[0])
 }
@@ -93,7 +88,7 @@ pub fn solve<T: FaerScalar>(
     transpose_a: bool,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::lu::solve(op, a, rhs, out, transpose_a, par, plan(par))
+    tlinalg::lu::solve(op, a, rhs, out, transpose_a, par)
 }
 
 pub struct FullPivLuFactors<'a, T> {
@@ -122,7 +117,6 @@ pub fn full_piv_lu<T: FaerScalar>(
             parity: &mut parity,
         },
         par,
-        plan(par),
     )?;
     Ok(parity[0])
 }
@@ -150,7 +144,6 @@ pub fn full_piv_lu_solve<T: FaerScalar>(
         transpose_a,
         &mut x,
         par,
-        plan(par),
     )?;
     rhs.copy_from_slice(&x);
     Ok(())
@@ -165,7 +158,7 @@ pub fn qr<T: FaerScalar>(
     r: &mut Vec<T>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::qr::qr(op, input, q, r, par, plan(par))
+    tlinalg::qr::qr(op, input, q, r, par)
 }
 
 pub fn rank_revealing_qr<T: FaerScalar>(
@@ -178,7 +171,7 @@ pub fn rank_revealing_qr<T: FaerScalar>(
     par: Parallel<'_>,
 ) -> Result<Vec<i64>> {
     let mut permutation = Vec::new();
-    tlinalg::qr::rank_revealing_qr(op, input, q, r, &mut permutation, par, plan(par))?;
+    tlinalg::qr::rank_revealing_qr(op, input, q, r, &mut permutation, par)?;
     Ok(permutation)
 }
 
@@ -190,7 +183,7 @@ pub fn eigh<T: FaerScalar>(
     vectors: &mut Vec<T>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::eigh::eigh(op, input, values, vectors, par, plan(par))
+    tlinalg::eigh::eigh(op, input, values, vectors, par)
 }
 
 pub fn eigh_values<T: FaerScalar>(
@@ -200,7 +193,7 @@ pub fn eigh_values<T: FaerScalar>(
     values: &mut Vec<T::Real>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::eigh::eigh_values(op, input, values, par, plan(par))
+    tlinalg::eigh::eigh_values(op, input, values, par)
 }
 
 pub fn eig<T: FaerScalar>(
@@ -211,7 +204,7 @@ pub fn eig<T: FaerScalar>(
     vectors: &mut Vec<T::Complex>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::eig::eig(op, input, values, vectors, par, plan(par))
+    tlinalg::eig::eig(op, input, values, vectors, par)
 }
 
 pub fn eig_values<T: FaerScalar>(
@@ -221,7 +214,7 @@ pub fn eig_values<T: FaerScalar>(
     values: &mut Vec<T::Complex>,
     par: Parallel<'_>,
 ) -> Result<()> {
-    tlinalg::eig::eig_values(op, input, values, par, plan(par))
+    tlinalg::eig::eig_values(op, input, values, par)
 }
 
 pub fn compact_factor<T: FaerScalar>(
@@ -235,7 +228,7 @@ pub fn compact_factor<T: FaerScalar>(
     if rows.checked_mul(cols) != Some(data.len()) {
         return Err(length_error(op));
     }
-    tlinalg::householder::compact_factor(op, rows, cols, 1, data, coeff, par, plan(par))
+    tlinalg::householder::compact_factor(op, rows, cols, 1, data, coeff, par)
 }
 
 pub fn apply_reflectors<T: FaerScalar>(
@@ -259,5 +252,5 @@ pub fn apply_reflectors<T: FaerScalar>(
         cols,
         k,
     };
-    tlinalg::householder::apply_reflectors(op, shape, 1, a, coeff, c, transpose, par, plan(par))
+    tlinalg::householder::apply_reflectors(op, shape, 1, a, coeff, c, transpose, par)
 }

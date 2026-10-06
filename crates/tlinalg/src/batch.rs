@@ -5,7 +5,7 @@
 //!
 //! * walks the batch dimensions of a rank-`2 + B` strided descriptor ([`BatchedRef`],
 //!   [`BatchedMut`]),
-//! * splits the batch into the host-chosen lanes and runs them on the caller's pool ([`run`]),
+//! * selects Auto lanes within the requested width and runs them on the caller's pool ([`run`]),
 //! * assembles the compact, batch-contiguous outputs without a zero-fill pass ([`Out`]) or hands
 //!   out disjoint chunks of a caller-owned compact buffer ([`InPlace`]).
 //!
@@ -24,9 +24,10 @@ use std::sync::Mutex;
 use faer::{MatMut, MatRef};
 use strided_view::{RawStridedMut, RawStridedRef};
 
+use crate::lane::LanePlan;
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, invalid};
-use crate::{with_parallel, Error, LanePlan, Op, Parallel, Result};
+use crate::{with_parallel, Error, Op, Parallel, Result};
 
 /// The batch count of a descriptor's trailing dimensions.
 fn batch_count(op: Op, batch_dims: &[usize]) -> Result<usize> {
@@ -703,14 +704,12 @@ impl_outputs_tuple!(A 0, B 1, C 2);
 impl_outputs_tuple!(A 0, B 1, C 2, D 3);
 impl_outputs_tuple!(A 0, B 1, C 2, D 3, E 4);
 
-/// Run `item` for every batch item, on the host's lane plan.
+/// Run the batch with library-owned Auto policy and one caller-owned resource.
 ///
-/// * `plan.lanes <= 1`: one lane, run in order on `plan.item_parallel`.
-/// * `plan.lanes > 1`: the batch is split into `chunk = batch.div_ceil(lanes)` contiguous chunks.
-///   With [`Parallel::Pool`] the pool is installed and each chunk is a `rayon::scope` task; each
-///   lane runs its items with [`Parallel::Sequential`], so a lane never nests a second fan-out
-///   (this is the semantics of the host's outer-lane children). With [`Parallel::Sequential`] the
-///   chunks run one after another on the calling thread.
+/// `Some(max_item_dim)` applies the ordinary size cutoff; `None` is packed LU's exception.
+/// One lane runs in order using the effective requested faer count hint. Multiple contiguous
+/// lanes use the supplied pool's `in_place_scope`, always with sequential children; their count
+/// never exceeds effective requested width. Sequential/effective width one stays on the caller.
 ///
 /// `make_scratch` builds one lane's scratch, reused for every item of that lane.
 ///
@@ -721,7 +720,7 @@ pub(crate) fn run<O, S, MK, F>(
     op: Op,
     batch: usize,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
+    max_item_dim: Option<usize>,
     outputs: &mut O,
     make_scratch: MK,
     item: F,
@@ -735,9 +734,12 @@ where
     if batch == 0 {
         return Ok(());
     }
-    let lanes = plan.lanes.clamp(1, batch);
-    let chunk = batch.div_ceil(lanes);
+    let par = par.bounded();
+    let plan = LanePlan::resolve(batch, par.budget().get(), max_item_dim);
+    let chunk = batch.div_ceil(plan.lanes);
     let lanes = batch.div_ceil(chunk);
+    #[cfg(test)]
+    tests::record_lanes(lanes);
     let result = {
         // SAFETY: `prepare` succeeded above; every lane is created once from its own index and
         // consumed inside this block, before `outputs` is touched again by `commit`.
@@ -764,52 +766,34 @@ where
             })
         };
         if lanes == 1 {
-            run_lane(0, plan.item_parallel)
-        } else {
-            match par {
-                Parallel::Pool { pool, .. } => {
-                    // The lowest failing lane's error; lanes never wait on or cancel each other.
-                    let failure: Mutex<Option<(usize, Error)>> = Mutex::new(None);
-                    let (run_lane, failure_ref) = (&run_lane, &failure);
-                    pool.install(|| {
-                        rayon::scope(|scope| {
-                            for lane in 0..lanes {
-                                scope.spawn(move |_| {
-                                    if let Err(error) = run_lane(lane, Parallel::Sequential) {
-                                        let mut slot = failure_ref
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        if slot.as_ref().is_none_or(|(first, _)| lane < *first) {
-                                            *slot = Some((lane, error));
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    });
-                    match failure
-                        .into_inner()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    {
-                        Some((_, error)) => Err(error),
-                        None => Ok(()),
-                    }
-                }
-                Parallel::Sequential => {
-                    // Every lane still runs, like the pool path; the first lane to fail reports and
-                    // the rest are not skipped, so a lane never stops because another one failed.
-                    let mut first: Option<Error> = None;
-                    for lane in 0..lanes {
+            run_lane(0, par)
+        } else if let Parallel::Pool { pool, .. } = par {
+            // Each lane stops independently; report the lowest failing lane deterministically.
+            let failure: Mutex<Option<(usize, Error)>> = Mutex::new(None);
+            let (run_lane, failure_ref) = (&run_lane, &failure);
+            pool.in_place_scope(|scope| {
+                for lane in 0..lanes {
+                    scope.spawn(move |_| {
                         if let Err(error) = run_lane(lane, Parallel::Sequential) {
-                            first.get_or_insert(error);
+                            let mut slot = failure_ref
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if slot.as_ref().is_none_or(|(first, _)| lane < *first) {
+                                *slot = Some((lane, error));
+                            }
                         }
-                    }
-                    match first {
-                        Some(error) => Err(error),
-                        None => Ok(()),
-                    }
+                    });
                 }
+            });
+            match failure
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                Some((_, error)) => Err(error),
+                None => Ok(()),
             }
+        } else {
+            unreachable!("Auto cannot select multiple lanes for a sequential resource")
         }
     };
     if result.is_ok() {
@@ -822,199 +806,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_injective, out, run, BatchAxes, BatchedMut, BatchedRef};
-    use crate::{Error, LanePlan, Op, Parallel};
-    use core::num::NonZeroUsize;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use strided_view::{RawStridedMut, RawStridedRef};
-
-    /// A failing lane must not stop the later ones on the no-pool fallback either: the driver only
-    /// ever reports the first failure, but every lane still runs.
-    #[test]
-    fn a_failing_lane_does_not_stop_the_later_ones() {
-        let ran = AtomicUsize::new(0);
-        let mut values: Vec<usize> = Vec::new();
-        let err = run(
-            Op::Svd,
-            6,
-            Parallel::Sequential,
-            LanePlan {
-                lanes: 3,
-                item_parallel: Parallel::Sequential,
-            },
-            &mut (out(&mut values, 1),),
-            |_| (),
-            |index, (_,), (), _| {
-                if index == 1 {
-                    return Err(Error::Inconsistent {
-                        op: Op::Svd,
-                        detail: "one",
-                    });
-                }
-                ran.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            Error::Inconsistent {
-                op: Op::Svd,
-                detail: "one"
-            }
-        );
-        // Items 0 and 2..5; the failing item 1 is not counted.
-        assert_eq!(ran.load(Ordering::Relaxed), 5);
-    }
-
-    /// Items 2 and 5 fail with distinguishable errors; whatever the scheduling, the error of the
-    /// lowest-indexed failing item is returned and the output stays empty.
-    #[test]
-    fn the_lowest_failing_item_wins_and_outputs_stay_empty() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(3)
-            .build()
-            .unwrap();
-        let par = Parallel::Pool {
-            pool: &pool,
-            budget: NonZeroUsize::new(3).unwrap(),
-        };
-        for lanes in [1, 2, 3, 4, 8] {
-            for _ in 0..20 {
-                let mut values = vec![9usize; 3];
-                let plan = LanePlan {
-                    lanes,
-                    item_parallel: Parallel::Sequential,
-                };
-                let err = run(
-                    Op::Svd,
-                    8,
-                    par,
-                    plan,
-                    &mut (out(&mut values, 1),),
-                    |_| (),
-                    |index, (values,), (), _| {
-                        if index == 2 || index == 5 {
-                            return Err(Error::Inconsistent {
-                                op: Op::Svd,
-                                detail: if index == 2 { "two" } else { "five" },
-                            });
-                        }
-                        values.push(index);
-                        Ok(())
-                    },
-                )
-                .unwrap_err();
-                assert_eq!(
-                    err,
-                    Error::Inconsistent {
-                        op: Op::Svd,
-                        detail: "two"
-                    },
-                    "lanes={lanes}"
-                );
-                assert!(values.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn a_kernel_that_writes_too_little_is_an_error() {
-        let mut values: Vec<u8> = Vec::new();
-        let err = run(
-            Op::Svd,
-            2,
-            Parallel::Sequential,
-            LanePlan::sequential(),
-            &mut (out(&mut values, 2),),
-            |_| (),
-            |_, (values,), (), _| {
-                values.push(1);
-                Ok(())
-            },
-        );
-        assert!(matches!(err, Err(Error::Inconsistent { .. })));
-        assert!(values.is_empty());
-    }
-
-    /// `strided-view` skips offset validation for an empty layout and then returns its `dangling()`
-    /// pointer, so an item that applied its batch offset could wrap that pointer to null. faer turns
-    /// the pointer it is handed into a `NonNull`, so a null is not an accepted input.
-    #[test]
-    fn an_empty_item_keeps_a_non_null_pointer() {
-        let empty: [f64; 0] = [];
-        let dims = [0usize, 0, 2];
-        // `wrapping_offset` counts elements, so a batch stride of `-1` is accepted for the empty
-        // layout and wraps the dangling pointer of address `align_of::<f64>() == 8` to null.
-        let strides = [1isize, 0, -1];
-        let view = RawStridedRef::new(&empty, &dims, &strides, 0).unwrap();
-        let batched = BatchedRef::new(Op::Svd, "input", view).unwrap();
-        assert_eq!(batched.batch(), 2);
-        for index in 0..batched.batch() {
-            let matrix = batched.item(index);
-            assert!(!matrix.as_ptr().is_null(), "item {index}");
-            assert_eq!(matrix.as_ptr() as usize % core::mem::align_of::<f64>(), 0);
-        }
-    }
-
-    #[test]
-    fn an_empty_mutable_item_keeps_a_non_null_pointer() {
-        let mut empty: [f64; 0] = [];
-        let dims = [0usize, 0, 2];
-        let strides = [1isize, 0, -1];
-        let mut view = RawStridedMut::new(&mut empty, &dims, &strides, 0).unwrap();
-        let batched = BatchedMut::new(Op::Svd, "output", &mut view).unwrap();
-        assert_eq!(batched.batch, 2);
-        for index in 0..batched.batch {
-            // SAFETY: every item is visited once and its matrix is dropped before the next.
-            let matrix = unsafe { batched.item(index) };
-            assert!(!matrix.as_ptr().is_null(), "item {index}");
-        }
-    }
-
-    #[test]
-    fn injectivity() {
-        assert!(is_injective(&[2, 3], &[1, 2]));
-        assert!(is_injective(&[2, 3, 4], &[1, 4, 12]));
-        assert!(!is_injective(&[2, 3], &[1, 1]));
-        assert!(!is_injective(&[2, 2, 2], &[1, 2, 0]));
-        assert!(is_injective(&[2, 1, 2], &[1, 0, 2]));
-        assert!(is_injective(&[0, 2], &[0, 0]));
-    }
-
-    #[test]
-    fn offsets_walk_the_first_batch_dim_fastest() {
-        let axes = BatchAxes::new(&[2, 3], &[10, 100]);
-        assert_eq!(axes.len(), 2, "not mergeable");
-        assert_eq!(axes.offset(0), 0);
-        assert_eq!(axes.offset(1), 10);
-        assert_eq!(axes.offset(2), 100);
-        assert_eq!(axes.offset(5), 210);
-    }
-
-    #[test]
-    fn compact_axes_coalesce_and_unit_axes_drop() {
-        let axes = BatchAxes::new(&[2, 1, 3, 4], &[9, 77, 18, 54]);
-        assert_eq!(axes.len(), 1);
-        assert_eq!(axes.offset(23), 23 * 9);
-        assert_eq!(BatchAxes::new(&[1, 1], &[5, 6]).len(), 0);
-        // Broadcast axis: stride 0 is kept and never merges with a non-zero neighbour.
-        let broadcast = BatchAxes::new(&[3, 2], &[0, 4]);
-        assert_eq!(broadcast.len(), 2);
-        assert_eq!(broadcast.offset(4), 4);
-        assert_eq!(BatchAxes::new(&[3, 2], &[0, 0]).offset(5), 0);
-    }
-
-    #[test]
-    fn axes_stay_inline_up_to_eight_and_spill_beyond() {
-        let dims = [2usize; 10];
-        // Non-mergeable: every stride leaves a gap.
-        let strides: Vec<isize> = (0..10).map(|axis| 3isize.pow(axis)).collect();
-        let eight = BatchAxes::new(&dims[..8], &strides[..8]);
-        assert!(eight.is_inline() && eight.len() == 8);
-        let ten = BatchAxes::new(&dims, &strides);
-        assert!(!ten.is_inline() && ten.len() == 10);
-        assert_eq!(ten.offset(1023), strides.iter().sum::<isize>());
-    }
-}
+mod tests;

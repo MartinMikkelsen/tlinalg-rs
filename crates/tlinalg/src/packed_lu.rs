@@ -6,7 +6,7 @@
 //!
 //! # Batches
 //!
-//! Every entry point operates on a whole batch, on the host's lane plan (see
+//! Every entry point operates on a whole batch, with library-owned Auto lanes (see
 //! `docs/design/batched-api.md`): the factors and right-hand sides are the host's compact,
 //! batch-contiguous buffers, updated in place, and the batch is split into
 //! `batch.div_ceil(lanes)`-item chunks that run as tasks on the caller's pool. This replaces the
@@ -30,7 +30,7 @@ use strided_view::RawStridedRef;
 
 use crate::batch::{self, in_place, same_batch, BatchAxes, BatchedRef};
 use crate::util::{checked_product, invalid};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// Reusable per-lane state for factoring a run of `m x n` matrices.
 ///
@@ -153,14 +153,14 @@ fn check_batches(op: Op, buffers: [(usize, usize); 3], batch: usize) -> Result<(
 /// # Examples
 ///
 /// ```
-/// use tlinalg::{packed_lu::factor, LanePlan, Op, Parallel};
+/// use tlinalg::{packed_lu::factor, Op, Parallel};
 ///
 /// let mut lu = [1.0_f64, 3.0, 2.0, 4.0];
 /// let (mut pivots, mut parity) = ([0_i32; 2], [0.0_f64; 1]);
-/// factor(Op::LuFactor, 2, 2, &mut lu, &mut pivots, &mut parity, Parallel::Sequential, LanePlan::sequential()).unwrap();
+/// factor(Op::LuFactor, 2, 2, &mut lu, &mut pivots, &mut parity, Parallel::Sequential).unwrap();
 /// assert_eq!((pivots, parity), ([2, 2], [-1.0]));
 /// ```
-// INVARIANT: shape, the three in-place batch buffers, token and plan are distinct operands.
+// INVARIANT: shape, the three in-place batch buffers, token are distinct operands.
 #[allow(clippy::too_many_arguments)]
 pub fn factor<T: FaerScalar>(
     op: Op,
@@ -170,7 +170,6 @@ pub fn factor<T: FaerScalar>(
     pivots: &mut [i32],
     parity: &mut [T],
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let k = m.min(n);
     let matrix_len = checked_product(op, "matrix shape", &[m, n])?;
@@ -187,7 +186,7 @@ pub fn factor<T: FaerScalar>(
         op,
         batch,
         par,
-        plan,
+        None,
         &mut (
             in_place(lu, matrix_len, "packed LU"),
             in_place(pivots, k, "pivots"),
@@ -229,7 +228,7 @@ fn apply_row_swaps<T: Copy>(rhs: &mut [T], n: usize, nrhs: usize, ipiv: &[i32], 
 
 /// Reject a pivot outside `1..=n`.
 ///
-/// A host that splits a batch into lanes can call this on the whole batch first, so that an invalid
+/// A host can validate the whole batch before calling a mutating routine, so that an invalid
 /// pivot is reported before any chunk mutates its output. Every solve entry point also validates the
 /// pivots it receives, so an implementation is safe on its own.
 ///
@@ -364,7 +363,7 @@ impl<'a> BatchedPivots<'a> {
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{packed_lu::solve_prepared, LanePlan, Op, Parallel};
+/// use tlinalg::{packed_lu::solve_prepared, Op, Parallel};
 ///
 /// // A = diag(2, 4) is its own packed factor with identity pivots.
 /// let lu = [2.0_f64, 0.0, 0.0, 4.0];
@@ -374,12 +373,11 @@ impl<'a> BatchedPivots<'a> {
 ///     Op::LuSolvePrepared,
 ///     RawStridedRef::new(&lu, &[2, 2], &[1, 2], 0).unwrap(),
 ///     RawStridedRef::new(&pivots, &[2], &[1], 0).unwrap(),
-///     1, &mut x, false, false, Parallel::Sequential, LanePlan::sequential(),
+///     1, &mut x, false, false, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(x, [1.0, 2.0]);
 /// ```
-// INVARIANT: factors, pivots, right-hand-side shape and buffer, the two solve flags, token and
-// plan are distinct operands of the prepared-solve contract.
+// INVARIANT: factors, pivots, right-hand-side shape and buffer, the two solve flags, token are distinct operands of the prepared-solve contract.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_prepared<T: FaerScalar>(
     op: Op,
@@ -390,7 +388,6 @@ pub fn solve_prepared<T: FaerScalar>(
     transpose_a: bool,
     conjugate_a: bool,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let lu = BatchedRef::square(op, "packed LU", packed_lu)?;
     let n = lu.rows();
@@ -413,7 +410,7 @@ pub fn solve_prepared<T: FaerScalar>(
         op,
         batch,
         par,
-        plan,
+        None,
         &mut (in_place(output, rhs_len, "rhs batch"),),
         |_| (),
         |index, (output,), (), par| {
@@ -447,15 +444,15 @@ pub fn solve_prepared<T: FaerScalar>(
 /// # Examples
 ///
 /// ```
-/// use tlinalg::{packed_lu::factor_solve, LanePlan, Op, Parallel};
+/// use tlinalg::{packed_lu::factor_solve, Op, Parallel};
 ///
 /// let mut lu = [2.0_f64, 0.0, 0.0, 4.0];
 /// let mut pivots = [0_i32; 2];
 /// let mut x = [2.0_f64, 8.0];
-/// factor_solve(Op::LuFactorSolve, 2, 1, &mut lu, &mut pivots, &mut x, Parallel::Sequential, LanePlan::sequential()).unwrap();
+/// factor_solve(Op::LuFactorSolve, 2, 1, &mut lu, &mut pivots, &mut x, Parallel::Sequential).unwrap();
 /// assert_eq!(x, [1.0, 2.0]);
 /// ```
-// INVARIANT: shape, the three in-place batch buffers, token and plan are distinct operands.
+// INVARIANT: shape, the three in-place batch buffers, token are distinct operands.
 #[allow(clippy::too_many_arguments)]
 pub fn factor_solve<T: FaerScalar>(
     op: Op,
@@ -465,7 +462,6 @@ pub fn factor_solve<T: FaerScalar>(
     pivots: &mut [i32],
     output: &mut [T],
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     let matrix_len = checked_product(op, "matrix", &[n, n])?;
     let rhs_len = checked_product(op, "rhs", &[n, nrhs])?;
@@ -487,7 +483,7 @@ pub fn factor_solve<T: FaerScalar>(
         op,
         batch,
         par,
-        plan,
+        None,
         &mut (
             in_place(packed_lu, matrix_len, "packed LU"),
             in_place(pivots, n, "pivots"),

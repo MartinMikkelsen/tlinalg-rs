@@ -6,7 +6,7 @@
 use num_complex::{Complex32, Complex64};
 use strided_view::RawStridedRef;
 use tlinalg::svd::{svd, svd_values};
-use tlinalg::{LanePlan, Op, Parallel};
+use tlinalg::{Op, Parallel};
 
 /// Column-major `m x n` matrix with well-separated singular values.
 fn matrix(m: usize, n: usize) -> Vec<f64> {
@@ -55,7 +55,6 @@ fn check_svd(m: usize, n: usize, full: bool) {
         &mut s,
         &mut vt,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
 
@@ -104,7 +103,6 @@ fn values_only_agrees_with_the_full_decomposition() {
         &mut full,
         &mut Vec::new(),
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     let mut only = Vec::new();
@@ -113,7 +111,6 @@ fn values_only_agrees_with_the_full_decomposition() {
         RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
         &mut only,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     for (got, want) in only.iter().zip(full.iter()) {
@@ -143,7 +140,6 @@ fn complex_and_f32_reconstruct() {
         &mut s,
         &mut vt,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     // `s` is carried in the complex scalar type with a zero imaginary part.
@@ -185,7 +181,6 @@ fn complex_and_f32_reconstruct() {
         &mut s32,
         &mut vt32,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
 
@@ -201,7 +196,6 @@ fn complex_and_f32_reconstruct() {
         &mut sr,
         &mut vtr,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     assert!(sr[0] > 0.0);
@@ -224,7 +218,6 @@ fn outputs_are_cleared_before_being_filled() {
         &mut s,
         &mut vt,
         Parallel::Sequential,
-        LanePlan::sequential(),
     )
     .unwrap();
     assert_eq!(u.len(), m * k);

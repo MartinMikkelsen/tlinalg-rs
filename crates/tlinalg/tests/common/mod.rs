@@ -24,10 +24,10 @@ impl<T: tlinalg_testkit::TestScalar + tlinalg::Scalar> TestScalar for T {}
 #[derive(Default)]
 pub struct CountingWorkspace;
 
-/// A two-thread pool, and the parallel token and a three-lane plan over it.
+/// A three-worker pool and its explicit budget token.
 pub fn lanes_pool() -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(2)
+        .num_threads(3)
         .build()
         .unwrap()
 }
@@ -35,13 +35,6 @@ pub fn lanes_pool() -> rayon::ThreadPool {
 pub fn pool_token(pool: &rayon::ThreadPool) -> tlinalg::Parallel<'_> {
     tlinalg::Parallel::Pool {
         pool,
-        budget: core::num::NonZeroUsize::new(2).unwrap(),
-    }
-}
-
-pub fn three_lanes() -> tlinalg::LanePlan<'static> {
-    tlinalg::LanePlan {
-        lanes: 3,
-        item_parallel: tlinalg::Parallel::Sequential,
+        budget: core::num::NonZeroUsize::new(3).unwrap(),
     }
 }

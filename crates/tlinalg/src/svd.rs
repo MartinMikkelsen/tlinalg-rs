@@ -29,7 +29,7 @@ use strided_view::RawStridedRef;
 use crate::batch::{self, out, BatchedRef, Push};
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, push_identity};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 /// One lane's faer storage for `m x n` decompositions.
 struct SvdScratch<E: faer::traits::ComplexField> {
@@ -165,14 +165,14 @@ fn svd_item<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{svd::svd_values, LanePlan, Op, Parallel};
+/// use tlinalg::{svd::svd_values, Op, Parallel};
 ///
 /// // Two 2x2 diagonal matrices, batch-contiguous.
 /// let a = [3.0_f64, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 5.0];
 /// let mut s = Vec::new();
 /// svd_values(
 ///     Op::SvdValues, RawStridedRef::new(&a, &[2, 2, 2], &[1, 2, 4], 0).unwrap(), &mut s,
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(s, [3.0, 1.0, 5.0, 2.0]);
 /// ```
@@ -181,7 +181,6 @@ pub fn svd_values<T: FaerScalar>(
     input: RawStridedRef<'_, T>,
     s: &mut Vec<<T as ScalarEntity>::Real>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     s.clear();
     let input = BatchedRef::new(op, "input", input)?;
@@ -190,7 +189,7 @@ pub fn svd_values<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(m.max(n)),
         &mut (out(s, m.min(n)),),
         |par| SvdScratch::<T::Entity>::new(m, n, ComputeSvdVectors::No, par),
         |index, (s,), scratch, par| svd_values_item::<T>(op, input.item(index), s, scratch, par),
@@ -212,17 +211,17 @@ pub fn svd_values<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{svd::svd, LanePlan, Op, Parallel};
+/// use tlinalg::{svd::svd, Op, Parallel};
 ///
 /// let a = [3.0_f64, 0.0, 0.0, 1.0];
 /// let (mut u, mut s, mut vt) = (Vec::new(), Vec::new(), Vec::new());
 /// svd(
 ///     Op::Svd, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), false,
-///     &mut u, &mut s, &mut vt, Parallel::Sequential, LanePlan::sequential(),
+///     &mut u, &mut s, &mut vt, Parallel::Sequential,
 /// ).unwrap();
 /// assert_eq!(s, [3.0, 1.0]);
 /// ```
-// INVARIANT: descriptor, mode, three output buffers, token and plan are distinct operands of one
+// INVARIANT: descriptor, mode, three output buffers, token are distinct operands of one
 // batched decomposition; grouping them would add a wrapper without removing an argument.
 #[allow(clippy::too_many_arguments)]
 pub fn svd<T: FaerScalar>(
@@ -233,7 +232,6 @@ pub fn svd<T: FaerScalar>(
     s: &mut Vec<T>,
     vt: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     u.clear();
     s.clear();
@@ -252,7 +250,7 @@ pub fn svd<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(m.max(n)),
         &mut (out(u, u_len), out(s, k), out(vt, vt_len)),
         |par| SvdScratch::<T::Entity>::new(m, n, vectors, par),
         |index, (u, s, vt), scratch, par| {

@@ -12,7 +12,7 @@ use strided_view::RawStridedRef;
 
 use crate::batch::{self, out, BatchedRef, Push};
 use crate::util::{checked_product, push_masked};
-use crate::{Error, FaerScalar, LanePlan, Op, Parallel, Result};
+use crate::{Error, FaerScalar, Op, Parallel, Result};
 
 struct CholeskyScratch<E: faer::traits::ComplexField> {
     work: Mat<E>,
@@ -54,13 +54,13 @@ fn cholesky_item<T: FaerScalar>(
 ///
 /// ```
 /// use strided_view::RawStridedRef;
-/// use tlinalg::{cholesky::cholesky, LanePlan, Op, Parallel};
+/// use tlinalg::{cholesky::cholesky, Op, Parallel};
 ///
 /// let a = [4.0_f64, 2.0, 2.0, 3.0];
 /// let mut l = Vec::new();
 /// cholesky(
 ///     Op::Cholesky, RawStridedRef::new(&a, &[2, 2], &[1, 2], 0).unwrap(), &mut l,
-///     Parallel::Sequential, LanePlan::sequential(),
+///     Parallel::Sequential,
 /// ).unwrap();
 /// assert!((l[0] - 2.0).abs() < 1e-12 && l[2] == 0.0);
 /// ```
@@ -69,7 +69,6 @@ pub fn cholesky<T: FaerScalar>(
     input: RawStridedRef<'_, T>,
     l: &mut Vec<T>,
     par: Parallel<'_>,
-    plan: LanePlan<'_>,
 ) -> Result<()> {
     l.clear();
     let input = BatchedRef::square(op, "input", input)?;
@@ -79,7 +78,7 @@ pub fn cholesky<T: FaerScalar>(
         op,
         input.batch(),
         par,
-        plan,
+        Some(n),
         &mut (out(l, l_len),),
         |par| CholeskyScratch {
             work: Mat::<T::Entity>::zeros(n, n),

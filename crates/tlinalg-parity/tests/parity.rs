@@ -155,10 +155,6 @@ macro_rules! parity_suite {
             const TOL: f64 = <T as TestScalar>::LOOSE_TOL;
             const SEQ: tlinalg::Parallel<'static> = tlinalg::Parallel::Sequential;
 
-            fn plan() -> tlinalg::LanePlan<'static> {
-                tlinalg::LanePlan::sequential()
-            }
-
             /// `count` items of `gen(index)` laid out over `dims`.
             fn input(
                 rows: usize,
@@ -191,7 +187,6 @@ macro_rules! parity_suite {
                             let (mut fu, mut fs, mut fvt) = (Vec::new(), Vec::new(), Vec::new());
                             tlinalg::svd::svd(
                                 tlinalg::Op::Svd, a.view(), full, &mut fu, &mut fs, &mut fvt, SEQ,
-                                plan(),
                             )
                             .unwrap();
                             let (mut bs, mut bu, mut bvt) = (Vec::new(), Vec::new(), Vec::new());
@@ -226,7 +221,7 @@ macro_rules! parity_suite {
                             }
                         }
                         let mut fs = Vec::new();
-                        tlinalg::svd::svd_values(tlinalg::Op::SvdValues, a.view(), &mut fs, SEQ, plan())
+                        tlinalg::svd::svd_values(tlinalg::Op::SvdValues, a.view(), &mut fs, SEQ)
                             .unwrap();
                         let (mut bs, mut bu, mut bvt) = (Vec::new(), Vec::new(), Vec::new());
                         tlinalg_blas::svd::svd(
@@ -248,7 +243,7 @@ macro_rules! parity_suite {
                 for (dims, layout) in configs() {
                     let a = input(n, n, &dims, layout, |i| hpd_seeded::<T>(n, i + 1));
                     let mut fl = Vec::new();
-                    tlinalg::cholesky::cholesky(tlinalg::Op::Cholesky, a.view(), &mut fl, SEQ, plan())
+                    tlinalg::cholesky::cholesky(tlinalg::Op::Cholesky, a.view(), &mut fl, SEQ)
                         .unwrap();
                     let mut bl = Vec::new();
                     tlinalg_blas::cholesky::cholesky(tlinalg_blas::Op::Cholesky, a.view(), &mut bl, &mut Ws)
@@ -279,7 +274,6 @@ macro_rules! parity_suite {
                         tlinalg::triangular_solve::TriangularSolveFlags { left_side, lower, transpose_a, unit_diagonal },
                         &mut fx,
                         SEQ,
-                        plan(),
                     )
                     .unwrap();
                     let mut bx = Vec::new();
@@ -336,7 +330,6 @@ macro_rules! parity_suite {
                             a.view(),
                             tlinalg::lu::LuFactors { p: &mut fp, l: &mut fl, u: &mut fu, parity: &mut fpar },
                             SEQ,
-                            plan(),
                         )
                         .unwrap();
                         let (mut bp, mut bl, mut bu, mut bpar) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -375,7 +368,7 @@ macro_rules! parity_suite {
                 let batch = &b.dims[2..];
                 for transpose_a in [false, true] {
                     let mut out = zeros(n, nrhs, batch);
-                    tlinalg::lu::solve(tlinalg::Op::Solve, a.view(), Some(b.view()), out.view_mut(), transpose_a, SEQ, plan())
+                    tlinalg::lu::solve(tlinalg::Op::Solve, a.view(), Some(b.view()), out.view_mut(), transpose_a, SEQ)
                         .unwrap();
                     let mut bx = Vec::new();
                     tlinalg_blas::solve::solve(tlinalg_blas::Op::Solve, transpose_a, a.view(), b.view(), &mut bx, &mut Ws)
@@ -385,7 +378,7 @@ macro_rules! parity_suite {
                     let fsolved: Vec<T> = (0..count).flat_map(|index| out.item(index)).collect();
                     assert_close(&widen(&fsolved), &widen(&bx), TOL, &format!("{what}: lu solve"));
                     let mut fx = Vec::new();
-                    tlinalg::full_piv_lu::full_piv_lu_solve(tlinalg::Op::FullPivLuSolve, a.view(), b.view(), transpose_a, &mut fx, SEQ, plan())
+                    tlinalg::full_piv_lu::full_piv_lu_solve(tlinalg::Op::FullPivLuSolve, a.view(), b.view(), transpose_a, &mut fx, SEQ)
                         .unwrap();
                     let mut bfx = Vec::new();
                     tlinalg_blas::full_piv_lu::full_piv_lu_solve(tlinalg_blas::Op::FullPivLuSolve, transpose_a, a.view(), b.view(), &mut bfx, &mut Ws)
@@ -425,7 +418,6 @@ macro_rules! parity_suite {
                         a.view(),
                         tlinalg::full_piv_lu::FullPivLuFactors { p: &mut fp, l: &mut fl, u: &mut fu, q: &mut fq, parity: &mut fpar },
                         SEQ,
-                        plan(),
                     )
                     .unwrap();
                     let (mut bp, mut bl, mut bu, mut bq, mut bpar) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -462,7 +454,7 @@ macro_rules! parity_suite {
                     for (dims, layout) in configs() {
                         let a = input(m, n, &dims, layout, |i| matrix::<T>(m, n, i));
                         let (mut fq, mut fr) = (Vec::new(), Vec::new());
-                        tlinalg::qr::qr(tlinalg::Op::Qr, a.view(), &mut fq, &mut fr, SEQ, plan()).unwrap();
+                        tlinalg::qr::qr(tlinalg::Op::Qr, a.view(), &mut fq, &mut fr, SEQ).unwrap();
                         let (mut bq, mut br) = (Vec::new(), Vec::new());
                         tlinalg_blas::qr::qr(tlinalg_blas::Op::Qr, a.view(), &mut bq, &mut br, &mut Ws).unwrap();
                         let what = format!("qr {m}x{n} {dims:?} {layout:?}");
@@ -493,7 +485,7 @@ macro_rules! parity_suite {
                     for (dims, layout) in configs() {
                         let a = input(m, n, &dims, layout, |i| matrix::<T>(m, n, i));
                         let (mut fq, mut fr, mut fperm) = (Vec::new(), Vec::new(), Vec::new());
-                        tlinalg::qr::rank_revealing_qr(tlinalg::Op::RankRevealingQr, a.view(), &mut fq, &mut fr, &mut fperm, SEQ, plan())
+                        tlinalg::qr::rank_revealing_qr(tlinalg::Op::RankRevealingQr, a.view(), &mut fq, &mut fr, &mut fperm, SEQ)
                             .unwrap();
                         let (mut bq, mut br, mut bperm) = (Vec::new(), Vec::new(), Vec::new());
                         tlinalg_blas::qr::rank_revealing_qr(
@@ -540,7 +532,7 @@ macro_rules! parity_suite {
                         }
                     });
                     let (mut fq, mut fr, mut fperm) = (Vec::new(), Vec::new(), Vec::new());
-                    tlinalg::qr::rank_revealing_qr(tlinalg::Op::RankRevealingQr, a.view(), &mut fq, &mut fr, &mut fperm, SEQ, plan())
+                    tlinalg::qr::rank_revealing_qr(tlinalg::Op::RankRevealingQr, a.view(), &mut fq, &mut fr, &mut fperm, SEQ)
                         .unwrap();
                     let (mut bq, mut br, mut bperm) = (Vec::new(), Vec::new(), Vec::new());
                     tlinalg_blas::qr::rank_revealing_qr(
@@ -575,7 +567,7 @@ macro_rules! parity_suite {
                 for (dims, layout) in configs() {
                     let a = input(n, n, &dims, layout, |i| hermitian_seeded::<T>(n, i + 2));
                     let (mut fw, mut fv) = (Vec::new(), Vec::new());
-                    tlinalg::eigh::eigh(tlinalg::Op::Eigh, a.view(), &mut fw, &mut fv, SEQ, plan()).unwrap();
+                    tlinalg::eigh::eigh(tlinalg::Op::Eigh, a.view(), &mut fw, &mut fv, SEQ).unwrap();
                     let (mut bw, mut bv) = (Vec::new(), Vec::new());
                     tlinalg_blas::eigh::eigh(tlinalg_blas::Op::Eigh, a.view(), &mut bw, Some(&mut bv), &mut Ws)
                         .unwrap();
@@ -597,7 +589,7 @@ macro_rules! parity_suite {
                         }
                     }
                     let mut fw = Vec::new();
-                    tlinalg::eigh::eigh_values(tlinalg::Op::EighValues, a.view(), &mut fw, SEQ, plan()).unwrap();
+                    tlinalg::eigh::eigh_values(tlinalg::Op::EighValues, a.view(), &mut fw, SEQ).unwrap();
                     let mut bw = Vec::new();
                     tlinalg_blas::eigh::eigh(tlinalg_blas::Op::EighValues, a.view(), &mut bw, None, &mut Ws).unwrap();
                     assert_close(&widen(&fw), &widen(&bw), TOL, &format!("eigvalsh {dims:?} {layout:?}"));
@@ -610,11 +602,11 @@ macro_rules! parity_suite {
                 for (dims, layout) in configs() {
                     let a = input(n, n, &dims, layout, |i| matrix::<T>(n, n, i));
                     let (mut fw, mut fv) = (Vec::new(), Vec::new());
-                    tlinalg::eig::eig(tlinalg::Op::Eig, a.view(), &mut fw, &mut fv, SEQ, plan()).unwrap();
+                    tlinalg::eig::eig(tlinalg::Op::Eig, a.view(), &mut fw, &mut fv, SEQ).unwrap();
                     let (mut bw, mut bv) = (Vec::new(), Vec::new());
                     tlinalg_blas::eig::eig(tlinalg_blas::Op::Eig, a.view(), &mut bw, Some(&mut bv), &mut Ws).unwrap();
                     let (mut fwo, mut bwo) = (Vec::new(), Vec::new());
-                    tlinalg::eig::eig_values(tlinalg::Op::EigValues, a.view(), &mut fwo, SEQ, plan()).unwrap();
+                    tlinalg::eig::eig_values(tlinalg::Op::EigValues, a.view(), &mut fwo, SEQ).unwrap();
                     tlinalg_blas::eig::eig(tlinalg_blas::Op::EigValues, a.view(), &mut bwo, None, &mut Ws).unwrap();
                     let what = format!("eig {dims:?} {layout:?}");
                     for index in 0..a.count() {
@@ -645,7 +637,7 @@ macro_rules! parity_suite {
                     let a: Vec<T> = (0..count).flat_map(|i| pivoting::<T>(n, n, i)).collect();
                     let b: Vec<T> = (0..count).flat_map(|i| matrix::<T>(n, nrhs, i + 5)).collect();
                     let (mut flu, mut fpiv, mut fpar) = (a.clone(), vec![0i32; n * count], vec![T::default(); count]);
-                    tlinalg::packed_lu::factor(tlinalg::Op::LuFactor, n, n, &mut flu, &mut fpiv, &mut fpar, SEQ, plan()).unwrap();
+                    tlinalg::packed_lu::factor(tlinalg::Op::LuFactor, n, n, &mut flu, &mut fpiv, &mut fpar, SEQ).unwrap();
                     let (mut blu, mut bpiv, mut bpar) = (a.clone(), vec![0i32; n * count], vec![T::default(); count]);
                     tlinalg_blas::lu::lu_factor(tlinalg_blas::Op::LuFactor, n, n, &mut blu, &mut bpiv, &mut bpar).unwrap();
                     let what = format!("packed lu batch {count}");
@@ -673,7 +665,6 @@ macro_rules! parity_suite {
                                 transpose_a,
                                 conjugate_a,
                                 SEQ,
-                                plan(),
                             )
                             .unwrap();
                             let mut bx = b.clone();
@@ -697,7 +688,7 @@ macro_rules! parity_suite {
                         }
                     }
                     let (mut flu2, mut fpiv2, mut fx) = (a.clone(), vec![0i32; n * count], b.clone());
-                    tlinalg::packed_lu::factor_solve(tlinalg::Op::LuFactorSolve, n, nrhs, &mut flu2, &mut fpiv2, &mut fx, SEQ, plan()).unwrap();
+                    tlinalg::packed_lu::factor_solve(tlinalg::Op::LuFactorSolve, n, nrhs, &mut flu2, &mut fpiv2, &mut fx, SEQ).unwrap();
                     let (mut blu2, mut bpiv2, mut bx) = (a.clone(), vec![0i32; n * count], b.clone());
                     tlinalg_blas::lu::lu_factor_solve(tlinalg_blas::Op::LuFactorSolve, n, nrhs, &mut blu2, &mut bpiv2, &mut bx).unwrap();
                     assert_close(&widen(&fx), &widen(&bx), TOL, &format!("{what}: fused factor+solve"));
@@ -712,7 +703,7 @@ macro_rules! parity_suite {
                     let a: Vec<T> = (0..count).flat_map(|i| matrix::<T>(rows, cols, i)).collect();
                     let mut fdata = a.clone();
                     let mut fcoeff = Vec::new();
-                    tlinalg::householder::compact_factor(tlinalg::Op::HouseholderQr, rows, cols, count, &mut fdata, &mut fcoeff, SEQ, plan())
+                    tlinalg::householder::compact_factor(tlinalg::Op::HouseholderQr, rows, cols, count, &mut fdata, &mut fcoeff, SEQ)
                         .unwrap();
                     let mut bdata = a.clone();
                     let mut btau = Vec::new();
@@ -737,7 +728,6 @@ macro_rules! parity_suite {
                         &mut fq,
                         false,
                         SEQ,
-                        plan(),
                     )
                     .unwrap();
                     let mut bq = eye.clone();
