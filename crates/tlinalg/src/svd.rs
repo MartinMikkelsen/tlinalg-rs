@@ -18,10 +18,18 @@
 //! returns the real values instead, matching the values-only path. `full` selects the square
 //! unitary factors `u_cols = m`, `v_cols = n`; otherwise `u_cols = v_cols = min(m, n)`. A full SVD
 //! of an empty matrix returns identity `U` and `Vᴴ`.
+//!
+//! # Accuracy
+//!
+//! faer's default parameters use a divide-and-conquer bidiagonal SVD once the smaller dimension
+//! reaches 128, and in faer 0.24.4 that path can return inaccurate factors without an error. A
+//! decomposition with vectors of that size is therefore checked against its input, by the
+//! Frobenius norm of `A - U diag(S) Vᴴ`, and repeated with the QR algorithm when the check fails
+//! or faer reports an error; [`svd_values`] always uses the QR algorithm. `docs/worklogs/svd-recursion-threshold.md` records the cost.
 
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::svd::ComputeSvdVectors;
+use faer::linalg::svd::{ComputeSvdVectors, SvdParams};
 use faer::{Mat, MatRef};
 
 use strided_view::RawStridedRef;
@@ -31,12 +39,65 @@ use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, push_identity};
 use crate::{Error, FaerScalar, Op, Parallel, Result};
 
+/// faer's parameters with the QR algorithm at every size.
+///
+/// faer's defaults switch from the QR algorithm to a divide-and-conquer bidiagonal SVD once the
+/// smaller dimension reaches `recursion_threshold` (128). In faer 0.24.4 that path returns a
+/// spurious singular value and inaccurate factors for some rank-deficient matrices with clustered
+/// singular values, without reporting an error (see the test
+/// `clustered_singular_values_of_a_rank_deficient_matrix`). These parameters never take it.
+fn qr_params<E: faer::traits::ComplexField>() -> faer::Spec<SvdParams, E> {
+    faer::Spec::new(SvdParams {
+        recursion_threshold: usize::MAX,
+        ..<SvdParams as faer::Auto<E>>::auto()
+    })
+}
+
+/// Whether faer's default parameters use divide and conquer for a smaller dimension of `k`.
+fn divides<E: faer::traits::ComplexField>(k: usize) -> bool {
+    k >= <SvdParams as faer::Auto<E>>::auto().recursion_threshold
+}
+
+/// Constant of [`residual_bound`]. Accurate decompositions of sizes up to 1024 in all four scalar
+/// types have relative residuals of 10 to 60 machine epsilons, at most a quarter of the bound at
+/// size 128; the inaccurate ones observed exceed it by a factor of 1e8.
+const RESIDUAL_FACTOR: f64 = 24.0;
+
+/// Largest accepted relative Frobenius residual `‖A - U diag(S) Vᴴ‖ / ‖A‖` of an `m x n`
+/// decomposition: `RESIDUAL_FACTOR * sqrt(max(m, n)) * epsilon`.
+///
+/// A singular value missing from an `n x n` identity leaves a relative residual of `1 / sqrt(n)`,
+/// which this bound rejects for `n < 1 / (RESIDUAL_FACTOR * epsilon)`: about 350 000 in single
+/// precision.
+fn residual_bound(m: usize, n: usize, epsilon: f64) -> f64 {
+    RESIDUAL_FACTOR * (m.max(n) as f64).sqrt() * epsilon
+}
+
+/// Storage for checking a decomposition with vectors against its input.
+struct Check<E: faer::traits::ComplexField> {
+    /// `U` with its columns scaled by the singular values, `m x k`.
+    scaled: Mat<E>,
+    /// The reconstruction and then its difference from the input, `m x n`.
+    residual: Mat<E>,
+}
+
+impl<E: faer::traits::ComplexField> Check<E> {
+    fn new(m: usize, n: usize) -> Self {
+        Self {
+            scaled: Mat::zeros(m, m.min(n)),
+            residual: Mat::zeros(m, n),
+        }
+    }
+}
+
 /// One lane's faer storage for `m x n` decompositions.
 struct SvdScratch<E: faer::traits::ComplexField> {
     u: Mat<E>,
     v: Mat<E>,
     s: Diag<E>,
     mem: MemBuffer,
+    /// Present when vectors are computed and the default parameters use divide and conquer.
+    check: Option<Check<E>>,
 }
 
 impl<E: faer::traits::ComplexField> SvdScratch<E> {
@@ -47,19 +108,73 @@ impl<E: faer::traits::ComplexField> SvdScratch<E> {
             ComputeSvdVectors::Thin => (k, k),
             ComputeSvdVectors::No => (0, 0),
         };
-        // An empty matrix is never decomposed, so it needs no faer scratch.
+        let checked = !matches!(vectors, ComputeSvdVectors::No) && divides::<E>(k);
+        // An empty matrix is never decomposed, so it needs no faer scratch. A checked
+        // decomposition may run a second time with the QR parameters in the same buffer.
         let req = if k == 0 {
             faer::dyn_stack::StackReq::EMPTY
         } else {
-            faer::linalg::svd::svd_scratch::<E>(m, n, vectors, vectors, par, Default::default())
+            let qr = faer::linalg::svd::svd_scratch::<E>(m, n, vectors, vectors, par, qr_params());
+            if checked {
+                qr.or(faer::linalg::svd::svd_scratch::<E>(
+                    m,
+                    n,
+                    vectors,
+                    vectors,
+                    par,
+                    Default::default(),
+                ))
+            } else {
+                qr
+            }
         };
         Self {
             u: Mat::zeros(m, u_cols),
             v: Mat::zeros(n, v_cols),
             s: Diag::zeros(k),
             mem: MemBuffer::new(req),
+            check: checked.then(|| Check::new(m, n)),
         }
     }
+}
+
+/// Whether the factors reproduce `mat`: the Frobenius norm of `mat - U diag(S) Vᴴ` is at most
+/// [`residual_bound`] times that of `mat`. `u` and `v` hold at least `min(m, n)` columns. A
+/// residual that is not finite is rejected.
+///
+/// The test is on the whole residual, so it holds for every input: factors that pass reproduce
+/// the matrix to the bound. It costs one matrix product.
+fn reproduces<E: faer::traits::ComplexField>(
+    mat: MatRef<'_, E>,
+    u: MatRef<'_, E>,
+    s: faer::diag::DiagRef<'_, E>,
+    v: MatRef<'_, E>,
+    check: &mut Check<E>,
+    epsilon: f64,
+    par: faer::Par,
+) -> bool {
+    use faer::traits::math_utils::{from_f64, mul, neg, one};
+
+    let (m, n) = (mat.nrows(), mat.ncols());
+    let k = m.min(n);
+    for col in 0..k {
+        let value = &s[col];
+        for row in 0..m {
+            check.scaled[(row, col)] = mul(&u[(row, col)], value);
+        }
+    }
+    check.residual.as_mut().copy_from(mat);
+    faer::linalg::matmul::matmul(
+        check.residual.as_mut(),
+        faer::Accum::Add,
+        check.scaled.as_ref(),
+        v.get(.., ..k).adjoint(),
+        neg(&one::<E>()),
+        par,
+    );
+    let bound = from_f64::<E::Real>(residual_bound(m, n, epsilon));
+    // A NaN residual fails this comparison and is rejected with the large ones.
+    check.residual.norm_l2() <= mul(&bound, &mat.norm_l2())
 }
 
 /// Singular values of one matrix, pushed in the real type.
@@ -85,7 +200,9 @@ fn svd_values_item<T: FaerScalar>(
         None,
         par,
         MemStack::new(&mut scratch.mem),
-        Default::default(),
+        // Without vectors there is no reconstruction to check, so the values never take the
+        // divide-and-conquer path.
+        qr_params(),
     )
     .map_err(|_| Error::NonConvergence { op })?;
     for index in 0..k {
@@ -119,16 +236,53 @@ fn svd_item<T: FaerScalar>(
     scratch.u.as_mut().fill(zero);
     scratch.v.as_mut().fill(zero);
     scratch.s.as_mut().fill(zero);
-    faer::linalg::svd::svd(
-        mat,
-        scratch.s.as_mut(),
-        Some(scratch.u.as_mut()),
-        Some(scratch.v.as_mut()),
-        par,
-        MemStack::new(&mut scratch.mem),
-        Default::default(),
-    )
-    .map_err(|_| Error::NonConvergence { op })?;
+    // The divide-and-conquer path of faer's default parameters can return inaccurate factors
+    // without an error. A decomposition that can take it runs with the defaults first and is
+    // repeated with the QR algorithm when faer reports an error or the factors do not reproduce
+    // the input.
+    let accurate = match scratch.check.as_mut() {
+        None => false,
+        Some(check) => {
+            faer::linalg::svd::svd(
+                mat,
+                scratch.s.as_mut(),
+                Some(scratch.u.as_mut()),
+                Some(scratch.v.as_mut()),
+                par,
+                MemStack::new(&mut scratch.mem),
+                Default::default(),
+            )
+            .is_ok()
+                && reproduces(
+                    mat,
+                    scratch.u.as_ref(),
+                    scratch.s.as_ref(),
+                    scratch.v.as_ref(),
+                    check,
+                    <T as ScalarEntity>::EPSILON,
+                    par,
+                )
+        }
+    };
+    if !accurate {
+        if scratch.check.is_some() {
+            #[cfg(test)]
+            tests::record_repeat();
+            scratch.u.as_mut().fill(zero);
+            scratch.v.as_mut().fill(zero);
+            scratch.s.as_mut().fill(zero);
+        }
+        faer::linalg::svd::svd(
+            mat,
+            scratch.s.as_mut(),
+            Some(scratch.u.as_mut()),
+            Some(scratch.v.as_mut()),
+            par,
+            MemStack::new(&mut scratch.mem),
+            qr_params(),
+        )
+        .map_err(|_| Error::NonConvergence { op })?;
+    }
 
     // Column-major `U`, `min(m, n)` real singular values, then column-major `Vᴴ`, pushed in the
     // order the previous implementation produced them.
@@ -258,3 +412,6 @@ pub fn svd<T: FaerScalar>(
         },
     )
 }
+
+#[cfg(test)]
+mod tests;

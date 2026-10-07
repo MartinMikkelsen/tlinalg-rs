@@ -107,6 +107,16 @@ impl<T: tlinalg_testkit::TestScalar> Batch<T> {
         })
     }
 
+    /// Square rank-deficient matrices with clustered singular values
+    /// ([`tlinalg_testkit::clustered_spectrum`]), the kind of input of
+    /// <https://github.com/tensor4all/tlinalg-rs/issues/13>.
+    pub fn clustered(n: usize, batch: usize) -> Self {
+        let spectrum = tlinalg_testkit::clustered_spectrum(n);
+        Self::new(n, n, batch, |item| {
+            tlinalg_testkit::with_singular_values::<T>(&spectrum, item as u64 + 1)
+        })
+    }
+
     /// Hermitian positive-definite matrices.
     pub fn hpd(n: usize, batch: usize) -> Self {
         Self::new(n, n, batch, |item| {

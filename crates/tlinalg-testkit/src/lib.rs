@@ -191,6 +191,87 @@ pub fn singular<T: TestScalar>(n: usize, seed: usize) -> Vec<T> {
     a
 }
 
+/// splitmix64 mapped to `[-1/2, 1/2)`.
+fn uniform(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+}
+
+/// Column-major `n x n` unitary matrix (orthogonal when `complex` is false): pseudo-random
+/// columns orthonormalized by two passes of modified Gram-Schmidt.
+fn unitary(n: usize, complex: bool, state: &mut u64) -> Vec<Complex64> {
+    let mut q: Vec<Complex64> = (0..n * n)
+        .map(|_| {
+            let re = uniform(state);
+            Complex64::new(re, if complex { uniform(state) } else { 0.0 })
+        })
+        .collect();
+    for col in 0..n {
+        for _ in 0..2 {
+            for prev in 0..col {
+                let dot: Complex64 = (0..n)
+                    .map(|row| q[row + prev * n].conj() * q[row + col * n])
+                    .sum();
+                for row in 0..n {
+                    let update = dot * q[row + prev * n];
+                    q[row + col * n] -= update;
+                }
+            }
+        }
+        let norm = (0..n)
+            .map(|row| q[row + col * n].norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        for row in 0..n {
+            q[row + col * n] /= norm;
+        }
+    }
+    q
+}
+
+/// Column-major square matrix `U diag(spectrum) Vᴴ` with pseudo-random unitary `U` and `V`
+/// (orthogonal for the real scalars), so its singular values are `spectrum`.
+pub fn with_singular_values<T: TestScalar>(spectrum: &[f64], seed: u64) -> Vec<T> {
+    let n = spectrum.len();
+    let mut state = seed;
+    let left = unitary(n, T::COMPLEX, &mut state);
+    let right = unitary(n, T::COMPLEX, &mut state);
+    let mut a = vec![Complex64::new(0.0, 0.0); n * n];
+    for col in 0..n {
+        for (j, &value) in spectrum.iter().enumerate() {
+            if value == 0.0 {
+                continue;
+            }
+            let weight = value * right[col + j * n].conj();
+            for row in 0..n {
+                a[row + col * n] += left[row + j * n] * weight;
+            }
+        }
+    }
+    narrow(&a)
+}
+
+/// Singular values of a rank-`n / 2` matrix that are clustered: three distinct values close to
+/// one, then ones, then zeros. For `n = 160` and `f64` or `Complex64`, the divide-and-conquer
+/// bidiagonal SVD of faer 0.24.4 returns `2^-13` in place of the first zero and factors that
+/// reproduce [`with_singular_values`] of this spectrum only to `1.4e-5`
+/// (<https://github.com/tensor4all/tlinalg-rs/issues/13>).
+pub fn clustered_spectrum(n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|index| match index {
+            0 => 1.0037,
+            1 => 1.00024,
+            2 => 1.000002,
+            index if index < n / 2 => 1.0,
+            _ => 0.0,
+        })
+        .collect()
+}
+
 /// Column-major `(m x k) (k x n)` in the reference type.
 pub fn matmul(a: &[Complex64], b: &[Complex64], m: usize, k: usize, n: usize) -> Vec<Complex64> {
     let mut out = vec![Complex64::new(0.0, 0.0); m * n];
