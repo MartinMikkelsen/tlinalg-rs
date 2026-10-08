@@ -17,6 +17,10 @@ provider-inject = []
 # Link OpenBLAS for this crate's own tests. Tenferro selects the source and the injected-symbol
 # path itself; this feature only exists so the crate has an executable check of its own.
 link-openblas = ["dep:blas-src", "dep:lapack-src"]
+# The same vendor, linked statically. The benchmark campaign builds the harness out of the
+# measured checkout and executes the binary directly, so it must not need a loader search path
+# (`openblas-src` is a shared library by default and says so in its build output).
+link-openblas-static = ["link-openblas", "dep:openblas-src", "openblas-src/static"]
 
 [dependencies]
 lapack = { workspace = true }
@@ -34,6 +38,12 @@ features = ["openblas"]
 workspace = true
 optional = true
 features = ["openblas"]
+
+# Referenced directly only to reach its `static` feature; `blas-src` already pulls it in for the
+# `openblas` source. Cargo unifies the two declarations into one build.
+[dependencies.openblas-src]
+workspace = true
+optional = true
 
 [dev-dependencies]
 tlinalg-testkit = { workspace = true }
