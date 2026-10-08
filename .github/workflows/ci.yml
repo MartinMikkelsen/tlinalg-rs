@@ -47,6 +47,16 @@ jobs:
       # The injected symbol set exports ?gesvd but not ?gesdd, so the other driver has to be
       # exercised too; OpenBLAS provides both symbols.
       - run: cargo test -j 16 --workspace --profile ci --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas
+      # A red gate here has to say which CPU ran it and which vendor build it linked. The linked
+      # tests have failed with SIGILL on a runner because the from-source OpenBLAS was built for
+      # an ISA that runner cannot execute, and neither fact was visible in the log.
+      - name: Host and vendor build (on failure)
+        if: failure()
+        run: |
+          lscpu | head -20
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^avx2|^avx512|^fma' | tr '\n' ' '; echo
+          find target -name Makefile.conf -path '*openblas*' -exec grep -HE '^(CORE|DYNAMIC_ARCH|NUM_THREADS|NO_AFFINITY)=' {} \; || true
+          find target -name 'libopenblas*' | head
 
   # Without a vendor library the faer provider still runs in full and the LAPACK marshalling still
   # has to compile.

@@ -1,0 +1,18 @@
+# Build-time environment for every cargo invocation in this workspace.
+#
+# The LAPACK provider links OpenBLAS from source (`link-openblas`), and without a target it lets
+# OpenBLAS's own `getarch` guess from the build host. On this host that guess is `COOPERLAKE`, an
+# Intel AVX-512 target, and the guess is not always one the *runtime* CPU can execute: the linked
+# tests then die with SIGILL, which is what `cargo test --features tlinalg-blas/link-openblas` on
+# CI did until this file existed. A vendor library that cannot be named, or that was built for a
+# guessed ISA, is not something a gate should depend on.
+#
+# `DYNAMIC_ARCH=1` compiles the kernels for several cores and dispatches at run time on CPUID,
+# checking the required features per core (OpenBLAS `driver/others/dynamic.c`) instead of trusting a
+# build-host guess. It is also what a distribution's OpenBLAS does, so the tests exercise the
+# vendor build most users actually have. The cost is a longer first build, cached afterwards.
+#
+# This declares the *test* configuration, not a measurement: the benchmark campaign builds its own
+# vendor and records the configuration and the dispatched kernel in the run manifest.
+[env]
+OPENBLAS_DYNAMIC_ARCH = "1"
