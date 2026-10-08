@@ -269,3 +269,38 @@ fn nearly_dependent_columns_keep_the_backward_error_small() {
         .fold(0.0, f64::max);
     assert!(gram_error < 1e-13, "orthogonality error {gram_error:e}");
 }
+
+/// `A = [a, a + 1e-12 e_0, e_1, ..., e_63]` with `a = (1, ..., 1)`, 64 x 65: a QR that skips the
+/// second column still reaches full row rank through the later ones, with a relative backward
+/// error of 1.0e-13 (<https://github.com/tensor4all/tlinalg-rs/issues/28>).
+#[test]
+fn nearly_dependent_columns_of_a_wide_matrix() {
+    let (m, n) = (64usize, 65usize);
+    let mut a = vec![0.0_f64; n * m];
+    a[..2 * m].fill(1.0);
+    a[m] += 1e-12;
+    for col in 2..n {
+        a[col - 1 + m * col] = 1.0;
+    }
+    let (mut q, mut r) = (Vec::new(), Vec::new());
+    qr(
+        Op::Qr,
+        m,
+        n,
+        RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        &mut q,
+        &mut r,
+        Parallel::Sequential,
+    )
+    .unwrap();
+    let (mut error, mut norm) = (0.0f64, 0.0f64);
+    for col in 0..n {
+        for row in 0..m {
+            let rebuilt: f64 = (0..m).map(|k| q[row + m * k] * r[k + m * col]).sum();
+            error += (rebuilt - a[row + m * col]).powi(2);
+            norm += a[row + m * col].powi(2);
+        }
+    }
+    let relative = (error / norm).sqrt();
+    assert!(relative < 1e-14, "relative backward error {relative:e}");
+}

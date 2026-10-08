@@ -116,21 +116,35 @@ fn qr_item<T: FaerScalar>(
     scratch
         .coeff
         .fill(<T::Entity as faer::traits::ComplexField>::zero_impl());
+    let (m, n) = (scratch.work.nrows(), scratch.work.ncols());
+    let k = m.min(n);
+    // faer skips a column whose part orthogonal to the earlier columns is below
+    // `16 (m - k) eps` times its norm, which loses nearly dependent columns (issue #28). Only the
+    // leading `k` columns are factored by faer: with no later column to take a skipped one's
+    // place, its rank is below `k` exactly when a column was skipped.
     let info = faer::linalg::qr::no_pivoting::factor::qr_in_place(
-        scratch.work.as_mut(),
+        scratch.work.as_mut().subcols_mut(0, k),
         scratch.coeff.as_mut(),
         par,
         MemStack::new(&mut scratch.factor_mem),
         Default::default(),
     );
     let mut block_rows = scratch.coeff.nrows();
-    if info.rank < scratch.work.nrows().min(scratch.work.ncols()) {
-        // faer skips a column whose part orthogonal to the earlier columns is below
-        // `16 (m - k) eps` times its norm, which loses nearly dependent columns (issue #28).
+    if info.rank < k {
         // Refactor with every column reflected.
         scratch.work.copy_from(mat);
         householder_qr_unblocked(scratch);
         block_rows = 1;
+    } else if k < n {
+        let (basis, rest) = scratch.work.as_mut().split_at_col_mut(k);
+        faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+            basis.as_ref(),
+            scratch.coeff.as_ref(),
+            Conj::Yes,
+            rest,
+            par,
+            MemStack::new(&mut scratch.factor_mem),
+        );
     }
     scratch.form_q(q, block_rows, par);
     push_factors::<T>(scratch, r);
