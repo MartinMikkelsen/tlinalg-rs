@@ -71,31 +71,57 @@ where
     }
     q.reserve(batch_len(op, q_len, count)?);
     r.reserve(batch_len(op, r_len, count)?);
-    let mut packed = workspace.acquire_capacity(matrix_len);
+    // With `m >= n` the destructible matrix and the thin `Q` have the same `m * n` entries, so each
+    // item is factored and then expanded in its own slot of `q`. A wide matrix needs `m * n >
+    // m * m` entries while it is factored, so it goes through a packed scratch copy.
+    let direct = m >= n;
+    let mut packed = if direct {
+        Vec::new()
+    } else {
+        workspace.acquire_capacity(matrix_len)
+    };
     let mut offsets = input.layout.offsets();
     let first = offsets.next().unwrap_or_default();
-    input.gather(first, &mut packed);
+    if direct {
+        input.gather(first, q);
+    } else {
+        input.gather(first, &mut packed);
+    }
     let mut tau = workspace.acquire_zeroed(k);
     check_scratch(op, tau.len(), k)?;
     // A stack slot, as before the move: the queries write one value each.
     let mut query = [T::default()];
     let mut info = 0;
-    // SAFETY: `packed` is a compact `m x n` matrix, `tau` has `k` entries, and `lwork = -1` writes
-    // only the query slot.
+    // SAFETY: the matrix is a compact `m x n` matrix, `tau` has `k` entries, and `lwork = -1`
+    // writes only the query slot.
     unsafe {
-        T::geqrf(mi, ni, &mut packed, mi, &mut tau, &mut query, -1, &mut info);
+        T::geqrf(
+            mi,
+            ni,
+            if direct { &mut q[..] } else { &mut packed[..] },
+            mi,
+            &mut tau,
+            &mut query,
+            -1,
+            &mut info,
+        );
     }
     check_info(op, T::GEQRF, info)?;
     let factor_len = work_len(op, "QR workspace", T::work_query_len(query[0]))?;
-    // SAFETY: `packed` is `q_len = m * k` long and the leading dimensions match the validated
-    // shape; `lwork = -1` reads no matrix contents and writes only the query slot, so this query
-    // does not depend on `packed` holding the `?geqrf` reflectors the loop below fills.
+    // SAFETY: the matrix is `q_len = m * k` long in its leading part and the leading dimensions
+    // match the validated shape; `lwork = -1` reads no matrix contents and writes only the query
+    // slot, so this query does not depend on the matrix holding the `?geqrf` reflectors the loop
+    // below fills.
     unsafe {
         T::orgqr(
             mi,
             ki,
             ki,
-            &mut packed[..q_len],
+            if direct {
+                &mut q[..q_len]
+            } else {
+                &mut packed[..q_len]
+            },
             mi,
             &tau,
             &mut query,
@@ -107,34 +133,34 @@ where
     let lwork = factor_len.max(work_len(op, "QR workspace", T::work_query_len(query[0]))?);
     let mut work = workspace.acquire_zeroed(lwork as usize);
     check_scratch(op, work.len(), lwork as usize)?;
-    // INVARIANT: the reduced `Q` occupies the first `m * k` entries of `packed`, `k <= n`. Every
-    // matrix shares the queried dimensions and scratch, and the scratch never aliases the input.
+    // INVARIANT: the reduced `Q` occupies the first `m * k` entries of the item's matrix, `k <= n`.
+    // Every matrix shares the queried dimensions and scratch, and the scratch never aliases the
+    // input. On the direct route item `i` owns `q[i * q_len..]`, which `gather` filled last.
     // LAPACK owns threading; the batch loop only prepares provider calls.
-    for offset in core::iter::once(first).chain(offsets) {
-        packed.clear();
-        input.gather(offset, &mut packed);
+    for (item, offset) in core::iter::once(first).chain(offsets).enumerate() {
+        let matrix: &mut [T] = if direct {
+            if item > 0 {
+                input.gather(offset, q);
+            }
+            &mut q[item * q_len..]
+        } else {
+            packed.clear();
+            input.gather(offset, &mut packed);
+            &mut packed
+        };
         // SAFETY: as for the queries, with the queried workspace length.
         unsafe {
-            T::geqrf(
-                mi,
-                ni,
-                &mut packed,
-                mi,
-                &mut tau,
-                &mut work,
-                lwork,
-                &mut info,
-            );
+            T::geqrf(mi, ni, matrix, mi, &mut tau, &mut work, lwork, &mut info);
         }
         check_info(op, T::GEQRF, info)?;
-        push_leading_upper(&packed, m, k, n, r);
+        push_leading_upper(matrix, m, k, n, r);
         // SAFETY: as for the queries, with the queried workspace length.
         unsafe {
             T::orgqr(
                 mi,
                 ki,
                 ki,
-                &mut packed[..q_len],
+                &mut matrix[..q_len],
                 mi,
                 &tau,
                 &mut work,
@@ -143,9 +169,13 @@ where
             );
         }
         check_info(op, T::ORGQR, info)?;
-        q.extend_from_slice(&packed[..q_len]);
+        if !direct {
+            q.extend_from_slice(&packed[..q_len]);
+        }
     }
-    workspace.release(packed);
+    if !direct {
+        workspace.release(packed);
+    }
     workspace.release(tau);
     workspace.release(work);
     Ok(())
