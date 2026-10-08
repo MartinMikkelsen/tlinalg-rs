@@ -585,6 +585,21 @@ fn check_qr<T: TestScalar>() {
                 "QᴴQ",
             );
         }
+        // Outputs holding stale contents and spare capacity give the same factors, for the whole
+        // batch and for its first matrix alone.
+        let (fresh_q, fresh_r) = (q.clone(), r.clone());
+        let stale = T::default();
+        let (mut q, mut r) = (
+            vec![stale; 3 * fresh_q.len()],
+            vec![stale; 3 * fresh_r.len()],
+        );
+        qr(Op::Qr, a.r(), &mut q, &mut r, &mut ws).unwrap();
+        assert_eq!((&q, &r), (&fresh_q, &fresh_r));
+        assert_eq!(ws.outstanding(), 0);
+        let one = Strided::compact(batch_of::<T>(m, n, 1, 0), m, n, Some(1));
+        qr(Op::Qr, one.r(), &mut q, &mut r, &mut ws).unwrap();
+        assert_eq!(q[..], fresh_q[..m * k]);
+        assert_eq!(r[..], fresh_r[..k * n]);
     }
 }
 

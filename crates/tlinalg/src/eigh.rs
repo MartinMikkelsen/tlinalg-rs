@@ -11,18 +11,18 @@
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::evd::ComputeEigenvectors;
-use faer::{Mat, MatRef};
+use faer::{MatMut, MatRef};
 use strided_view::RawStridedRef;
 
 use crate::batch::{self, out, BatchedRef};
 use crate::scalar::ScalarEntity;
-use crate::util::{checked_product, push_mat};
+use crate::util::checked_product;
 use crate::{Error, FaerScalar, Op, Parallel, Result};
 
-/// Lane scratch for `n x n` Hermitian eigendecompositions.
+/// Lane scratch for `n x n` Hermitian eigendecompositions. The eigenvectors are written straight
+/// into the caller's output, so only the eigenvalues and faer's workspace live here.
 struct EighScratch<E: faer::traits::ComplexField> {
     values: Diag<E>,
-    vectors: Mat<E>,
     mem: MemBuffer,
 }
 
@@ -34,13 +34,8 @@ impl<E: faer::traits::ComplexField> EighScratch<E> {
         } else {
             faer::linalg::evd::self_adjoint_evd_scratch::<E>(n, vectors, par, Default::default())
         };
-        let vector_cols = match vectors {
-            ComputeEigenvectors::Yes => n,
-            ComputeEigenvectors::No => 0,
-        };
         Self {
             values: Diag::zeros(n),
-            vectors: Mat::zeros(n, vector_cols),
             mem: MemBuffer::new(req),
         }
     }
@@ -50,17 +45,11 @@ impl<E: faer::traits::ComplexField> EighScratch<E> {
 fn decompose<E: faer::traits::ComplexField>(
     op: Op,
     mat: MatRef<'_, E>,
-    with_vectors: bool,
+    vectors: Option<MatMut<'_, E>>,
     scratch: &mut EighScratch<E>,
     par: faer::Par,
 ) -> Result<()> {
     scratch.values.as_mut().fill(E::zero_impl());
-    let vectors = if with_vectors {
-        scratch.vectors.as_mut().fill(E::zero_impl());
-        Some(scratch.vectors.as_mut())
-    } else {
-        None
-    };
     faer::linalg::evd::self_adjoint_evd(
         mat,
         scratch.values.as_mut(),
@@ -116,7 +105,7 @@ pub fn eigh_values<T: FaerScalar>(
             if n == 0 {
                 return Ok(());
             }
-            decompose(op, input.item(index), false, scratch, par)?;
+            decompose(op, input.item(index), None, scratch, par)?;
             for i in 0..n {
                 values.push(T::real_from_entity(scratch.values[i]));
             }
@@ -175,11 +164,14 @@ pub fn eigh<T: FaerScalar>(
             if n == 0 {
                 return Ok(());
             }
-            decompose(op, input.item(index), true, scratch, par)?;
+            // The output region is zeroed before faer sees it, as the lane scratch was.
+            let region = vectors.fill(v_len, |_| T::default());
+            let region = T::entity_slice_mut(region);
+            let target = MatMut::from_column_major_slice_mut(region, n, n);
+            decompose(op, input.item(index), Some(target), scratch, par)?;
             for i in 0..n {
                 values.push(T::from_real(T::real_from_entity(scratch.values[i])));
             }
-            push_mat(vectors, scratch.vectors.as_ref());
             Ok(())
         },
     )

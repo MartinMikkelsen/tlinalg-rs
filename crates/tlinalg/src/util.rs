@@ -53,15 +53,6 @@ pub(crate) fn push_masked<T: ScalarEntity>(
     }
 }
 
-/// Push the whole column-major contents of `mat`.
-pub(crate) fn push_mat<T: ScalarEntity>(out: &mut impl Push<T>, mat: MatRef<'_, T::Entity>) {
-    for col in 0..mat.ncols() {
-        for row in 0..mat.nrows() {
-            out.push(T::from_entity(mat[(row, col)]));
-        }
-    }
-}
-
 /// Push the `n x n` permutation matrix with a one at `(row, perm[row])`, column-major.
 ///
 /// `perm_inv` is the inverse permutation, so column `col` has its one in row `perm_inv[col]`.
