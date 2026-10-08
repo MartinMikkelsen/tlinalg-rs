@@ -224,3 +224,63 @@ fn outputs_are_cleared_before_being_filled() {
     assert_eq!(s.len(), k);
     assert_eq!(vt.len(), k * n);
 }
+
+/// A rank-deficient matrix with clustered singular values, for which faer's divide-and-conquer
+/// SVD is inaccurate (<https://github.com/tensor4all/tlinalg-rs/issues/13>). Both entry points
+/// have to return its singular values, and the factors have to reproduce it.
+#[test]
+fn clustered_singular_values_of_a_rank_deficient_matrix() {
+    let n = 160usize;
+    let spectrum = tlinalg_testkit::clustered_spectrum(n);
+    for full in [false, true] {
+        let a: Vec<Complex64> = tlinalg_testkit::with_singular_values(&spectrum, 1);
+        let (mut u, mut s, mut vt) = (Vec::new(), Vec::new(), Vec::new());
+        svd(
+            Op::Svd,
+            RawStridedRef::new(&a, &[n, n], &[1, n as isize], 0).unwrap(),
+            full,
+            &mut u,
+            &mut s,
+            &mut vt,
+            Parallel::Sequential,
+        )
+        .unwrap();
+        let mut values = Vec::new();
+        svd_values(
+            Op::SvdValues,
+            RawStridedRef::new(&a, &[n, n], &[1, n as isize], 0).unwrap(),
+            &mut values,
+            Parallel::Sequential,
+        )
+        .unwrap();
+
+        for (index, want) in spectrum.iter().enumerate() {
+            assert!(
+                (s[index].re - want).abs() < 1e-12,
+                "full={full}: singular value {index}: {} != {want}",
+                s[index].re
+            );
+            assert!(
+                (values[index] - want).abs() < 1e-12,
+                "singular value {index} of the values-only path: {} != {want}",
+                values[index]
+            );
+        }
+        let mut error = 0.0f64;
+        for col in 0..n {
+            for row in 0..n {
+                let mut rebuilt = Complex64::new(0.0, 0.0);
+                for j in 0..n {
+                    rebuilt += u[row + j * n] * s[j] * vt[j + col * n];
+                }
+                error += (rebuilt - a[row + col * n]).norm_sqr();
+            }
+        }
+        // The Frobenius norm of the matrix is about sqrt(n / 2).
+        let relative = (error / (n / 2) as f64).sqrt();
+        assert!(
+            relative < 1e-12,
+            "full={full}: relative reconstruction error {relative:e}"
+        );
+    }
+}

@@ -473,11 +473,61 @@ fn rank_revealing_qr<T: BenchScalar>(
     g.finish();
 }
 
-fn svd<T: BenchScalar>(c: &mut Criterion, env: &Env, cases: &[(String, usize, usize, usize)]) {
-    let mut g = group(c, "svd", T::LABEL);
+/// Single matrices past the size at which faer's default parameters would leave the QR algorithm
+/// for divide and conquer (128): square, tall and wide.
+fn large_svd_cases() -> Vec<(String, usize, usize, usize)> {
+    [
+        ("n256xb1", 256, 256),
+        ("n1024xb1", 1024, 1024),
+        ("t1024x256", 1024, 256),
+        ("w256x1024", 256, 1024),
+    ]
+    .into_iter()
+    .map(|(case, m, n)| (case.to_owned(), m, n, 1))
+    .collect()
+}
+
+/// The matrices a singular value decomposition is timed on.
+#[derive(Clone, Copy, PartialEq)]
+enum SvdInput {
+    /// [`Batch::general`]: a growing diagonal plus periodic off-diagonal entries.
+    General,
+    /// [`Batch::clustered`]: rank-deficient with clustered singular values. At size 160 the `f64`
+    /// and `Complex64` decompositions with vectors are repeated with the QR algorithm.
+    Clustered,
+}
+
+/// Square matrices with clustered singular values: the size at which the decomposition with
+/// vectors is repeated, and one at which it is not.
+fn clustered_svd_cases() -> Vec<(String, usize, usize, usize)> {
+    [160usize, 256]
+        .into_iter()
+        .map(|n| (format!("n{n}xb1"), n, n, 1))
+        .collect()
+}
+
+/// Thin factors in the group `svd`, full factors in `svd_full`; `svd_clustered` for
+/// [`SvdInput::Clustered`].
+fn svd<T: BenchScalar>(
+    c: &mut Criterion,
+    env: &Env,
+    cases: &[(String, usize, usize, usize)],
+    full: bool,
+    input: SvdInput,
+) {
+    let family = match (full, input) {
+        (false, SvdInput::General) => "svd",
+        (true, SvdInput::General) => "svd_full",
+        (false, SvdInput::Clustered) => "svd_clustered",
+        (true, SvdInput::Clustered) => "svd_full_clustered",
+    };
+    let mut g = group(c, family, T::LABEL);
     for (case, m, n, batch) in cases {
         let (m, n, batch) = (*m, *n, *batch);
-        let a = Batch::<T>::general(m, n, batch);
+        let a = match input {
+            SvdInput::General => Batch::<T>::general(m, n, batch),
+            SvdInput::Clustered => Batch::<T>::clustered(m, batch),
+        };
         let (mut u, mut s, mut vt) = (Vec::new(), Vec::new(), Vec::new());
         let lapack = lapack_row!({
             let a = &a;
@@ -490,7 +540,11 @@ fn svd<T: BenchScalar>(c: &mut Criterion, env: &Env, cases: &[(String, usize, us
             move || {
                 tlinalg_blas::svd::svd(
                     tlinalg_blas::Op::Svd,
-                    tlinalg_blas::svd::SvdMode::Thin,
+                    if full {
+                        tlinalg_blas::svd::SvdMode::Full
+                    } else {
+                        tlinalg_blas::svd::SvdMode::Thin
+                    },
                     a.view(),
                     tlinalg_blas::svd::SvdOutputs {
                         s: &mut s,
@@ -507,7 +561,7 @@ fn svd<T: BenchScalar>(c: &mut Criterion, env: &Env, cases: &[(String, usize, us
             env,
             case,
             |par| {
-                tlinalg::svd::svd(Op::Svd, a.view(), false, &mut u, &mut s, &mut vt, par).unwrap();
+                tlinalg::svd::svd(Op::Svd, a.view(), full, &mut u, &mut s, &mut vt, par).unwrap();
             },
             lapack,
         );
@@ -691,8 +745,17 @@ fn real_f64(c: &mut Criterion) {
     triangular_solve::<f64>(c, &env, &all);
     qr::<f64>(c, &env, &rect);
     rank_revealing_qr::<f64>(c, &env, &rect_cases(&large, true));
-    svd::<f64>(c, &env, &rect);
-    svdvals::<f64>(c, &env, &rect);
+    let large_svd = large_svd_cases();
+    svd::<f64>(
+        c,
+        &env,
+        &[rect.as_slice(), large_svd.as_slice()].concat(),
+        false,
+        SvdInput::General,
+    );
+    svd::<f64>(c, &env, &large_svd, true, SvdInput::General);
+    svd::<f64>(c, &env, &clustered_svd_cases(), false, SvdInput::Clustered);
+    svdvals::<f64>(c, &env, &[rect.as_slice(), large_svd.as_slice()].concat());
     eigh::<f64>(c, &env, &all, false);
     eigh::<f64>(c, &env, &all, true);
     eig::<f64>(c, &env, &large);
@@ -710,7 +773,12 @@ fn complex_c64(c: &mut Criterion) {
     packed_lu::<num_complex::Complex64>(c, &env, &cases);
     solve::<num_complex::Complex64>(c, &env, &cases);
     qr::<num_complex::Complex64>(c, &env, &rect);
-    svd::<num_complex::Complex64>(c, &env, &rect);
+    let large_svd = large_svd_cases();
+    let svd_cases = [rect.as_slice(), large_svd.as_slice()].concat();
+    svd::<num_complex::Complex64>(c, &env, &svd_cases, false, SvdInput::General);
+    svd::<num_complex::Complex64>(c, &env, &large_svd, true, SvdInput::General);
+    svd::<num_complex::Complex64>(c, &env, &clustered_svd_cases(), false, SvdInput::Clustered);
+    svdvals::<num_complex::Complex64>(c, &env, &svd_cases);
     eigh::<num_complex::Complex64>(c, &env, &cases, false);
 }
 
