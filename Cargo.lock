@@ -1489,6 +1489,7 @@ dependencies = [
  "lapack",
  "lapack-src",
  "num-complex",
+ "openblas-src",
  "strided-view",
  "thiserror 2.0.21",
  "tlinalg-testkit",

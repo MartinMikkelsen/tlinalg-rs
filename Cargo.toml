@@ -32,6 +32,9 @@ lapack = "0.20"
 cblas-sys = "0.1"
 blas-src = { version = "0.14", default-features = false }
 lapack-src = "0.13"
+# The vendor itself, referenced directly only so a feature can select `static` or `system`
+# through `openblas-src`; `blas-src`/`lapack-src` select the OpenBLAS source for us.
+openblas-src = { version = "0.10" }
 # Benchmarks only.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 

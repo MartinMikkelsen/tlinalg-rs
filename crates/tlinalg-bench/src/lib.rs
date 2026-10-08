@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use strided_view::RawStridedRef;
 use tlinalg_blas::{IndexWorkspace, Workspace};
 
+pub mod harness;
+pub mod vendor;
+
 /// A scalar both providers and the test generators support.
 pub trait BenchScalar:
     tlinalg::FaerScalar + tlinalg_blas::LapackScalar + tlinalg_testkit::TestScalar
@@ -52,7 +55,11 @@ pub struct Env {
 impl Env {
     /// Build a pool of [`bench_threads`] workers.
     pub fn new() -> Self {
-        let threads = bench_threads();
+        Self::with_threads(bench_threads())
+    }
+
+    /// Build a pool with the caller's explicit thread budget.
+    pub fn with_threads(threads: NonZeroUsize) -> Self {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads.get())
             .build()

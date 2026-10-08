@@ -13,6 +13,9 @@ publish = false
 default = []
 # Link OpenBLAS and add the LAPACK provider's rows. Without it only the faer rows run.
 link-openblas = ["tlinalg-blas/link-openblas"]
+# The same vendor, linked statically, so the built harness can be executed directly with no
+# loader search path to arrange. The benchmark campaign measures this configuration.
+link-openblas-static = ["tlinalg-blas/link-openblas-static"]
 
 [dependencies]
 tlinalg = { workspace = true }
