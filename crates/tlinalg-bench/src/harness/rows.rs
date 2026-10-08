@@ -586,6 +586,8 @@ fn call_lapack<T: BenchScalar>(family: &str, c: Case) -> Result<(), String> {
 }
 #[cfg(not(any(feature = "link-openblas", feature = "link-openblas-static")))]
 fn call_lapack<T: BenchScalar>(_family: &str, _c: Case) -> Result<(), String> {
+    // The signature has to match the linked variant's, which the caller uses with a turbofish.
+    let _ = core::marker::PhantomData::<T>;
     Err("lapack vendor not linked".into())
 }
 
@@ -722,6 +724,9 @@ impl_eig_buffers!(f64);
 impl_eig_buffers!(Complex64);
 
 pub(crate) trait LapackEigh: BenchScalar {
+    /// Only the vendor verify path calls this, and that path is compiled out when no vendor
+    /// library is linked; the bound stays unconditional so the generic code keeps one shape.
+    #[allow(dead_code)]
     fn lapack_eigh(
         a: &Batch<Self>,
         values: &mut Vec<f64>,
@@ -759,7 +764,6 @@ macro_rules! impl_lapack_eigh {
 }
 impl_lapack_eigh!(f64);
 impl_lapack_eigh!(Complex64);
-
 pub(crate) trait RealValues: BenchScalar {
     fn faer_values(a: &Batch<Self>) -> Result<Vec<f64>, String>;
     #[cfg(any(feature = "link-openblas", feature = "link-openblas-static"))]
