@@ -30,7 +30,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # The from-source OpenBLAS is built for the machine that builds it, so a `target/` cache
+      # restored from a runner of another CPU model hands this job a vendor library its CPU may not
+      # be able to execute. Scope the cache to the CPU model as well as the OS and arch.
+      - id: cpu
+        run: |
+          echo "key=$(lscpu | sed -n 's/^Model name: *//p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ steps.cpu.outputs.key }}
       - run: cargo clippy -j 16 --workspace --all-targets -- -D warnings
       - run: cargo clippy -j 16 --workspace --all-targets --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas,tlinalg-bench/link-openblas -- -D warnings
 
@@ -42,11 +50,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # See the `clippy` job: the cache has to be scoped to the CPU model, or a vendor library built
+      # on one runner is executed on another. SAPPHIRERAPIDS kernels restored onto a Milan host are
+      # what made this job die with SIGILL.
+      - id: cpu
+        run: |
+          echo "key=$(lscpu | sed -n 's/^Model name: *//p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ steps.cpu.outputs.key }}
       - run: cargo test -j 16 --workspace --profile ci --features tlinalg-blas/link-openblas,tlinalg-parity/link-openblas
       # The injected symbol set exports ?gesvd but not ?gesdd, so the other driver has to be
       # exercised too; OpenBLAS provides both symbols.
       - run: cargo test -j 16 --workspace --profile ci --features tlinalg-blas/link-openblas,tlinalg-blas/provider-inject,tlinalg-parity/link-openblas
+      # A red gate here has to say which CPU ran it and which vendor build it linked. The linked
+      # tests have failed with SIGILL on a runner because the from-source OpenBLAS was built for
+      # an ISA that runner cannot execute, and neither fact was visible in the log.
+      - name: Host and vendor build (on failure)
+        if: failure()
+        run: |
+          lscpu | head -20
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^avx2|^avx512|^fma' | tr '\n' ' '; echo
+          find target -name Makefile.conf -path '*openblas*' -exec grep -HE '^(CORE|DYNAMIC_ARCH|NUM_THREADS|NO_AFFINITY)=' {} \; || true
+          find target -name 'libopenblas*' | head
 
   # Without a vendor library the faer provider still runs in full and the LAPACK marshalling still
   # has to compile.

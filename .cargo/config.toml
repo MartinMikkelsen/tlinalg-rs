@@ -1,0 +1,24 @@
+# Build-time environment for every cargo invocation in this workspace.
+#
+# The LAPACK provider links OpenBLAS from source (`link-openblas`). Two facts about that build have
+# already cost this repository a red gate:
+#
+# * the built library belongs to the machine that built it. A `target/` cache restored from a runner
+#   of another CPU model hands the job a library its CPU may not be able to execute. On CI, a
+#   SAPPHIRERAPIDS build (AVX-512, AMX) was restored onto a Milan (Zen 3) runner and the linked
+#   test binaries died with SIGILL, with no OpenBLAS build in the log to explain it;
+# * with no target, `openblas-src` lets OpenBLAS's own `getarch` guess from the build host — here
+#   `CORE=COOPERLAKE`, an Intel AVX-512 target — and a guessed target is not one the run-time CPU
+#   is obliged to execute.
+#
+# `DYNAMIC_ARCH=1` compiles the kernels for several cores and dispatches at run time on CPUID, with
+# the required features checked per core (OpenBLAS `driver/others/dynamic.c`). The library is then
+# portable across the runner fleet instead of being tied to whatever the build host guessed, and it
+# is also the vendor build a distribution ships. The CI jobs additionally scope their cache to the
+# runner's CPU model, because DYNAMIC_ARCH does not make a *stale* cached tree rebuild.
+#
+# The cost is a longer first build, cached afterwards. This declares the *test* configuration, not a
+# measurement: the benchmark campaign builds its own vendor and records the configuration and the
+# dispatched kernel in the run manifest.
+[env]
+OPENBLAS_DYNAMIC_ARCH = "1"
