@@ -11,18 +11,17 @@
 //! `tlinalg-blas` and the pre-extraction host did.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::{Conj, Mat, MatRef};
+use faer::{Conj, Mat, MatMut, MatRef};
 use strided_view::RawStridedRef;
 
 use crate::batch::{self, out, BatchedRef, Push, Sink};
-use crate::util::{checked_product, invalid, push_masked, push_mat};
+use crate::util::{checked_product, invalid, push_masked};
 use crate::{FaerScalar, Op, Parallel, Result};
 
 /// Lane scratch for `m x n` QR factorizations, plain or column-pivoted.
 struct QrScratch<E: faer::traits::ComplexField> {
     work: Mat<E>,
     coeff: Mat<E>,
-    q: Mat<E>,
     permutation: Vec<usize>,
     inverse_permutation: Vec<usize>,
     factor_mem: MemBuffer,
@@ -53,7 +52,6 @@ impl<E: faer::traits::ComplexField> QrScratch<E> {
         Self {
             work: Mat::zeros(m, n),
             coeff: Mat::zeros(block_size, k),
-            q: Mat::zeros(m, k),
             // On 64-bit targets the permutation is written straight into the `i64` output, so only
             // the inverse needs lane storage.
             permutation: vec![0; if pivoting && !PERMUTATION_IN_OUTPUT { n } else { 0 }],
@@ -67,32 +65,30 @@ impl<E: faer::traits::ComplexField> QrScratch<E> {
         }
     }
 
-    /// Build the thin `Q` from the reflectors in `work`/`coeff`.
-    fn form_q(&mut self, par: faer::Par) {
-        let k = self.q.ncols();
-        // `Q = H_1 ... H_k I`: reset the lane buffer to the thin identity first.
-        self.q.fill(<E as faer::traits::ComplexField>::zero_impl());
-        for i in 0..k {
-            self.q[(i, i)] = <E as faer::traits::ComplexField>::one_impl();
-        }
+    /// Write the thin `Q` from the reflectors in `work`/`coeff` into the caller's output.
+    fn form_q<T: FaerScalar<Entity = E>>(&mut self, q: &mut Sink<'_, T>, par: faer::Par) {
+        let (m, k) = (self.work.nrows(), self.work.nrows().min(self.work.ncols()));
+        // `Q = H_1 ... H_k I`: the output region starts as the thin identity.
+        let region = T::entity_slice_mut(q.fill(m * k, |index| {
+            if index % m == index / m {
+                T::parity(false)
+            } else {
+                T::default()
+            }
+        }));
         faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
             self.work.as_ref().subcols(0, k),
             self.coeff.as_ref(),
             Conj::No,
-            self.q.as_mut(),
+            MatMut::from_column_major_slice_mut(region, m, k),
             par,
             MemStack::new(&mut self.apply_mem),
         );
     }
 }
 
-fn push_factors<T: FaerScalar>(
-    scratch: &QrScratch<T::Entity>,
-    q: &mut impl Push<T>,
-    r: &mut impl Push<T>,
-) {
-    let k = scratch.q.ncols();
-    push_mat(q, scratch.q.as_ref());
+fn push_factors<T: FaerScalar>(scratch: &QrScratch<T::Entity>, r: &mut impl Push<T>) {
+    let k = scratch.work.nrows().min(scratch.work.ncols());
     push_masked(
         r,
         scratch.work.as_ref(),
@@ -104,7 +100,7 @@ fn push_factors<T: FaerScalar>(
 
 fn qr_item<T: FaerScalar>(
     mat: MatRef<'_, T::Entity>,
-    q: &mut impl Push<T>,
+    q: &mut Sink<'_, T>,
     r: &mut impl Push<T>,
     scratch: &mut QrScratch<T::Entity>,
     par: faer::Par,
@@ -120,8 +116,8 @@ fn qr_item<T: FaerScalar>(
         MemStack::new(&mut scratch.factor_mem),
         Default::default(),
     );
-    scratch.form_q(par);
-    push_factors::<T>(scratch, q, r);
+    scratch.form_q(q, par);
+    push_factors::<T>(scratch, r);
 }
 
 /// Whether faer's `usize` permutation can be written straight into the `i64` output: true where
@@ -132,7 +128,7 @@ const PERMUTATION_IN_OUTPUT: bool = core::mem::size_of::<usize>() == core::mem::
 fn rank_revealing_qr_item<T: FaerScalar>(
     op: Op,
     mat: MatRef<'_, T::Entity>,
-    (q, r, permutation): (&mut impl Push<T>, &mut impl Push<T>, &mut Sink<'_, i64>),
+    (q, r, permutation): (&mut Sink<'_, T>, &mut impl Push<T>, &mut Sink<'_, i64>),
     scratch: &mut QrScratch<T::Entity>,
     par: faer::Par,
 ) -> Result<()> {
@@ -190,8 +186,8 @@ fn rank_revealing_qr_item<T: FaerScalar>(
             })?;
         }
     }
-    scratch.form_q(par);
-    push_factors::<T>(scratch, q, r);
+    scratch.form_q(q, par);
+    push_factors::<T>(scratch, r);
     Ok(())
 }
 

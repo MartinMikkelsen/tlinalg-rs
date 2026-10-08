@@ -30,11 +30,11 @@
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::svd::{ComputeSvdVectors, SvdParams};
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
 
 use strided_view::RawStridedRef;
 
-use crate::batch::{self, out, BatchedRef, Push};
+use crate::batch::{self, out, BatchedRef, Push, Sink};
 use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, push_identity};
 use crate::{Error, FaerScalar, Op, Parallel, Result};
@@ -92,7 +92,6 @@ impl<E: faer::traits::ComplexField> Check<E> {
 
 /// One lane's faer storage for `m x n` decompositions.
 struct SvdScratch<E: faer::traits::ComplexField> {
-    u: Mat<E>,
     v: Mat<E>,
     s: Diag<E>,
     mem: MemBuffer,
@@ -103,10 +102,10 @@ struct SvdScratch<E: faer::traits::ComplexField> {
 impl<E: faer::traits::ComplexField> SvdScratch<E> {
     fn new(m: usize, n: usize, vectors: ComputeSvdVectors, par: faer::Par) -> Self {
         let k = m.min(n);
-        let (u_cols, v_cols) = match vectors {
-            ComputeSvdVectors::Full => (m, n),
-            ComputeSvdVectors::Thin => (k, k),
-            ComputeSvdVectors::No => (0, 0),
+        let v_cols = match vectors {
+            ComputeSvdVectors::Full => n,
+            ComputeSvdVectors::Thin => k,
+            ComputeSvdVectors::No => 0,
         };
         let checked = !matches!(vectors, ComputeSvdVectors::No) && divides::<E>(k);
         // An empty matrix is never decomposed, so it needs no faer scratch. A checked
@@ -129,7 +128,6 @@ impl<E: faer::traits::ComplexField> SvdScratch<E> {
             }
         };
         Self {
-            u: Mat::zeros(m, u_cols),
             v: Mat::zeros(n, v_cols),
             s: Diag::zeros(k),
             mem: MemBuffer::new(req),
@@ -216,7 +214,7 @@ fn svd_item<T: FaerScalar>(
     op: Op,
     mat: MatRef<'_, T::Entity>,
     full: bool,
-    (u, s, vt): (&mut impl Push<T>, &mut impl Push<T>, &mut impl Push<T>),
+    (u, s, vt): (&mut Sink<'_, T>, &mut impl Push<T>, &mut impl Push<T>),
     scratch: &mut SvdScratch<T::Entity>,
     par: faer::Par,
 ) -> Result<()> {
@@ -230,10 +228,10 @@ fn svd_item<T: FaerScalar>(
         return Ok(());
     }
     let (u_cols, v_cols) = if full { (m, n) } else { (k, k) };
-    // The pre-extraction code handed faer freshly zeroed outputs; the lane buffers are reset to the
-    // same state so reuse cannot leak a previous item into this one.
+    // `U` is computed in place in the caller's output. faer receives zeroed storage there and in
+    // the lane buffers, so reuse cannot leak a previous item into this one.
     let zero = <T::Entity as faer::traits::ComplexField>::zero_impl();
-    scratch.u.as_mut().fill(zero);
+    let u_region = T::entity_slice_mut(u.fill(m * u_cols, |_| T::default()));
     scratch.v.as_mut().fill(zero);
     scratch.s.as_mut().fill(zero);
     // The divide-and-conquer path of faer's default parameters can return inaccurate factors
@@ -246,7 +244,11 @@ fn svd_item<T: FaerScalar>(
             faer::linalg::svd::svd(
                 mat,
                 scratch.s.as_mut(),
-                Some(scratch.u.as_mut()),
+                Some(MatMut::from_column_major_slice_mut(
+                    &mut *u_region,
+                    m,
+                    u_cols,
+                )),
                 Some(scratch.v.as_mut()),
                 par,
                 MemStack::new(&mut scratch.mem),
@@ -255,7 +257,7 @@ fn svd_item<T: FaerScalar>(
             .is_ok()
                 && reproduces(
                     mat,
-                    scratch.u.as_ref(),
+                    MatRef::from_column_major_slice(&*u_region, m, u_cols),
                     scratch.s.as_ref(),
                     scratch.v.as_ref(),
                     check,
@@ -268,14 +270,18 @@ fn svd_item<T: FaerScalar>(
         if scratch.check.is_some() {
             #[cfg(test)]
             tests::record_repeat();
-            scratch.u.as_mut().fill(zero);
+            u_region.fill(zero);
             scratch.v.as_mut().fill(zero);
             scratch.s.as_mut().fill(zero);
         }
         faer::linalg::svd::svd(
             mat,
             scratch.s.as_mut(),
-            Some(scratch.u.as_mut()),
+            Some(MatMut::from_column_major_slice_mut(
+                &mut *u_region,
+                m,
+                u_cols,
+            )),
             Some(scratch.v.as_mut()),
             par,
             MemStack::new(&mut scratch.mem),
@@ -284,13 +290,6 @@ fn svd_item<T: FaerScalar>(
         .map_err(|_| Error::NonConvergence { op })?;
     }
 
-    // Column-major `U`, `min(m, n)` real singular values, then column-major `Vᴴ`, pushed in the
-    // order the previous implementation produced them.
-    for col in 0..u_cols {
-        for row in 0..m {
-            u.push(T::from_entity(scratch.u[(row, col)]));
-        }
-    }
     for index in 0..k {
         // A real singular value carried in the scalar type: zero imaginary part for the complex
         // scalars, which is the shape the pre-extraction callers consumed.
