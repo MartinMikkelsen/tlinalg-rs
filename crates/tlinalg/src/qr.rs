@@ -66,7 +66,14 @@ impl<E: faer::traits::ComplexField> QrScratch<E> {
     }
 
     /// Write the thin `Q` from the reflectors in `work`/`coeff` into the caller's output.
-    fn form_q<T: FaerScalar<Entity = E>>(&mut self, q: &mut Sink<'_, T>, par: faer::Par) {
+    ///
+    /// `block_rows` is the row count of the blocked reflector factors held in `coeff`.
+    fn form_q<T: FaerScalar<Entity = E>>(
+        &mut self,
+        q: &mut Sink<'_, T>,
+        block_rows: usize,
+        par: faer::Par,
+    ) {
         let (m, k) = (self.work.nrows(), self.work.nrows().min(self.work.ncols()));
         // `Q = H_1 ... H_k I`: the output region starts as the thin identity.
         let region = T::entity_slice_mut(q.fill(m * k, |index| {
@@ -78,7 +85,7 @@ impl<E: faer::traits::ComplexField> QrScratch<E> {
         }));
         faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
             self.work.as_ref().subcols(0, k),
-            self.coeff.as_ref(),
+            self.coeff.as_ref().subrows(0, block_rows),
             Conj::No,
             MatMut::from_column_major_slice_mut(region, m, k),
             par,
@@ -109,15 +116,58 @@ fn qr_item<T: FaerScalar>(
     scratch
         .coeff
         .fill(<T::Entity as faer::traits::ComplexField>::zero_impl());
-    faer::linalg::qr::no_pivoting::factor::qr_in_place(
+    let info = faer::linalg::qr::no_pivoting::factor::qr_in_place(
         scratch.work.as_mut(),
         scratch.coeff.as_mut(),
         par,
         MemStack::new(&mut scratch.factor_mem),
         Default::default(),
     );
-    scratch.form_q(q, par);
+    let mut block_rows = scratch.coeff.nrows();
+    if info.rank < scratch.work.nrows().min(scratch.work.ncols()) {
+        // faer skips a column whose part orthogonal to the earlier columns is below
+        // `16 (m - k) eps` times its norm, which loses nearly dependent columns (issue #28).
+        // Refactor with every column reflected.
+        scratch.work.copy_from(mat);
+        householder_qr_unblocked(scratch);
+        block_rows = 1;
+    }
+    scratch.form_q(q, block_rows, par);
     push_factors::<T>(scratch, r);
+}
+
+/// Householder QR of `scratch.work` that reflects every column, leaving the unblocked reflector
+/// factors in the first row of `scratch.coeff`. A column that is zero below the diagonal gets the
+/// identity reflector, as in faer.
+fn householder_qr_unblocked<E: faer::traits::ComplexField>(scratch: &mut QrScratch<E>) {
+    let (m, n) = (scratch.work.nrows(), scratch.work.ncols());
+    scratch.coeff.fill(E::zero_impl());
+    for col in 0..m.min(n) {
+        let info = {
+            let (mut head_row, tail) = scratch
+                .work
+                .as_mut()
+                .get_mut(col.., col)
+                .split_at_row_mut(1);
+            faer::linalg::householder::make_householder_in_place(&mut head_row[0], tail)
+        };
+        scratch.coeff[(0, col)] = faer::traits::ext::RealFieldExt::to_cplx(&info.tau);
+        if col + 1 < n {
+            let (head, rest) = scratch
+                .work
+                .as_mut()
+                .get_mut(col.., ..)
+                .split_at_col_mut(col + 1);
+            faer::linalg::householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(
+                head.as_ref().get(.., col..col + 1),
+                scratch.coeff.as_ref().get(0..1, col..col + 1),
+                Conj::Yes,
+                rest,
+                faer::Par::Seq,
+                MemStack::new(&mut scratch.factor_mem),
+            );
+        }
+    }
 }
 
 /// Whether faer's `usize` permutation can be written straight into the `i64` output: true where
@@ -186,7 +236,7 @@ fn rank_revealing_qr_item<T: FaerScalar>(
             })?;
         }
     }
-    scratch.form_q(q, par);
+    scratch.form_q(q, scratch.coeff.nrows(), par);
     push_factors::<T>(scratch, r);
     Ok(())
 }

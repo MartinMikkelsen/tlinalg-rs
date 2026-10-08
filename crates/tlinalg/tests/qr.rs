@@ -229,3 +229,43 @@ fn rank_revealing_qr_returns_the_identity_for_an_all_zero_item() {
     assert_eq!(&perm[..n], &[0, 1, 2, 3]);
     assert!(r[k * n..].iter().any(|&v| v != 0.0));
 }
+
+/// `A = [a, a + 1e-10 e_0, a + 1e-6 e_1]` with `a = (1, ..., 1)`: faer's unpivoted QR skips the
+/// second column at `m = 1000`, leaving a relative backward error of 2.6e-12
+/// (<https://github.com/tensor4all/tlinalg-rs/issues/28>).
+#[test]
+fn nearly_dependent_columns_keep_the_backward_error_small() {
+    let (m, n) = (1000usize, 3usize);
+    let mut a = vec![1.0_f64; n * m];
+    a[m] += 1e-10;
+    a[2 * m + 1] += 1e-6;
+    let (mut q, mut r) = (Vec::new(), Vec::new());
+    qr(
+        Op::Qr,
+        m,
+        n,
+        RawStridedRef::new(&a, &[m, n], &[1, m as isize], 0).unwrap(),
+        &mut q,
+        &mut r,
+        Parallel::Sequential,
+    )
+    .unwrap();
+    let (mut error, mut norm) = (0.0f64, 0.0f64);
+    for col in 0..n {
+        for row in 0..m {
+            let rebuilt: f64 = (0..n).map(|k| q[row + m * k] * r[k + n * col]).sum();
+            error += (rebuilt - a[row + m * col]).powi(2);
+            norm += a[row + m * col].powi(2);
+        }
+    }
+    let relative = (error / norm).sqrt();
+    assert!(relative < 1e-14, "relative backward error {relative:e}");
+    let gram_error = (0..n)
+        .flat_map(|i| (0..n).map(move |j| (i, j)))
+        .map(|(i, j)| {
+            let dot: f64 = (0..m).map(|row| q[row + m * i] * q[row + m * j]).sum();
+            (dot - if i == j { 1.0 } else { 0.0 }).abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(gram_error < 1e-13, "orthogonality error {gram_error:e}");
+}

@@ -284,3 +284,43 @@ fn clustered_singular_values_of_a_rank_deficient_matrix() {
         );
     }
 }
+
+/// `A = [a, a + 1e-10 e_0, a + 1e-6 e_1]` with `a = (1, ..., 1)`: `sigma_3 / sigma_1` is 1.2903e-12
+/// (50-digit arithmetic). faer's preliminary Householder QR of a tall matrix drops the nearly
+/// dependent columns, so the singular values must come out of a direct bidiagonalization
+/// (<https://github.com/tensor4all/tlinalg-rs/issues/28>).
+#[test]
+fn nearly_dependent_columns_of_a_tall_matrix() {
+    let m = 1000usize;
+    let mut a = vec![1.0_f64; 3 * m];
+    a[m] += 1e-10;
+    a[2 * m + 1] += 1e-6;
+    let (dims, strides) = ([m, 3], [1, m as isize]);
+    let view = || RawStridedRef::new(&a, &dims, &strides, 0).unwrap();
+    let want = 1.2903e-12;
+
+    let mut values = Vec::new();
+    svd_values(Op::SvdValues, view(), &mut values, Parallel::Sequential).unwrap();
+    let ratio = values[2] / values[0];
+    assert!(
+        (ratio / want - 1.0).abs() < 1e-2,
+        "values-only sigma_3/sigma_1 = {ratio:e}, want {want:e}"
+    );
+
+    let (mut u, mut s, mut vt) = (Vec::new(), Vec::new(), Vec::new());
+    svd(
+        Op::Svd,
+        view(),
+        false,
+        &mut u,
+        &mut s,
+        &mut vt,
+        Parallel::Sequential,
+    )
+    .unwrap();
+    let ratio = s[2] / s[0];
+    assert!(
+        (ratio / want - 1.0).abs() < 1e-2,
+        "sigma_3/sigma_1 = {ratio:e}, want {want:e}"
+    );
+}

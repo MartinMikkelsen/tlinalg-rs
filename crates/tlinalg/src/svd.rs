@@ -39,7 +39,11 @@ use crate::scalar::ScalarEntity;
 use crate::util::{checked_product, push_identity};
 use crate::{Error, FaerScalar, Op, Parallel, Result};
 
-/// faer's parameters with the QR algorithm at every size.
+/// faer's parameters with the QR algorithm at every size and no preliminary QR factorization.
+///
+/// faer's preliminary Householder QR of a matrix with aspect ratio above `qr_ratio_threshold`
+/// drops a column whose part orthogonal to the earlier columns is below `16 (m - k) eps` times its
+/// norm, which loses small singular values (issue #28). The matrix is bidiagonalized directly.
 ///
 /// faer's defaults switch from the QR algorithm to a divide-and-conquer bidiagonal SVD once the
 /// smaller dimension reaches `recursion_threshold` (128). In faer 0.24.4 that path returns a
@@ -49,6 +53,15 @@ use crate::{Error, FaerScalar, Op, Parallel, Result};
 fn qr_params<E: faer::traits::ComplexField>() -> faer::Spec<SvdParams, E> {
     faer::Spec::new(SvdParams {
         recursion_threshold: usize::MAX,
+        qr_ratio_threshold: f64::INFINITY,
+        ..<SvdParams as faer::Auto<E>>::auto()
+    })
+}
+
+/// faer's default parameters without the preliminary QR factorization (see [`qr_params`]).
+fn auto_params<E: faer::traits::ComplexField>() -> faer::Spec<SvdParams, E> {
+    faer::Spec::new(SvdParams {
+        qr_ratio_threshold: f64::INFINITY,
         ..<SvdParams as faer::Auto<E>>::auto()
     })
 }
@@ -121,7 +134,7 @@ impl<E: faer::traits::ComplexField> SvdScratch<E> {
                     vectors,
                     vectors,
                     par,
-                    Default::default(),
+                    auto_params(),
                 ))
             } else {
                 qr
@@ -252,7 +265,7 @@ fn svd_item<T: FaerScalar>(
                 Some(scratch.v.as_mut()),
                 par,
                 MemStack::new(&mut scratch.mem),
-                Default::default(),
+                auto_params(),
             )
             .is_ok()
                 && reproduces(
