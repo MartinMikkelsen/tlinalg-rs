@@ -61,6 +61,17 @@ The crate documentation is the specification for the rest:
 * output assembly and lane scratch — `docs/design/batched-api.md`;
 * the error vocabulary — `tlinalg::Error`.
 
+## Relationship to `t4a-faer`
+
+`tlinalg` is a batch layer over the dense matrix library [`t4a-faer`](https://github.com/tensor4all/faer)
+(package `t4a-faer`, library `faer`): each batch item is one of its factorizations or solves, and this
+crate adds the batch loop, the lane fan-out and the borrowed workspace around it. Use `tlinalg` when the
+unit is a batch of matrices and the host wants one call; call `t4a-faer` directly when the unit is a
+single matrix and you want the factor object itself. Its
+[usage skill](https://github.com/tensor4all/faer/blob/main/skills/faer-usage/SKILL.md) covers
+factorization choice, scratch sizing, and the execution token: a caller hands this crate a `tcontract_exec::Exec`
+(`crates/tlinalg/src/cholesky.rs:151`), and the faer `Par` for each lane is derived inside (`crates/tlinalg/src/batch.rs:1102`).
+
 ## Status
 
 Extraction in progress. Nothing is published; `publish = false` is set deliberately until the
