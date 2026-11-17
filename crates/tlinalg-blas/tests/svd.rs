@@ -116,8 +116,15 @@ fn svd_reconstructs_c64() {
 
 /// A column-major `Complex64` matrix stored as two little-endian `u64` dimensions `m, n` followed by
 /// `m * n` pairs of little-endian `f64` (real, imaginary).
-fn read_fixture(name: &str) -> (usize, usize, Vec<Complex64>) {
-    let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+///
+/// Returns `None` when `tests/data` is absent, as in the packaged crate, which excludes it.
+fn read_fixture(name: &str) -> Option<(usize, usize, Vec<Complex64>)> {
+    let dir = format!("{}/tests/data", env!("CARGO_MANIFEST_DIR"));
+    if !std::path::Path::new(&dir).is_dir() {
+        eprintln!("skipping: {dir} is absent");
+        return None;
+    }
+    let path = format!("{dir}/{name}");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     let word = |i: usize| -> [u8; 8] { bytes[8 * i..8 * i + 8].try_into().unwrap() };
     let (m, n) = (
@@ -137,7 +144,7 @@ fn read_fixture(name: &str) -> (usize, usize, Vec<Complex64>) {
             )
         })
         .collect();
-    (m, n, data)
+    Some((m, n, data))
 }
 
 /// Two rank-79 `158 x 158` matrices on which Accelerate's legacy `zgesdd` reports `info = 0` but
@@ -146,8 +153,12 @@ fn read_fixture(name: &str) -> (usize, usize, Vec<Complex64>) {
 /// the vendor this test is linked against.
 #[test]
 fn svd_reconstructs_matrices_that_break_accelerate_zgesdd() {
-    let (m, n, first) = read_fixture("accelerate_zgesdd_0.bin");
-    let (m1, n1, second) = read_fixture("accelerate_zgesdd_1.bin");
+    let (Some((m, n, first)), Some((m1, n1, second))) = (
+        read_fixture("accelerate_zgesdd_0.bin"),
+        read_fixture("accelerate_zgesdd_1.bin"),
+    ) else {
+        return;
+    };
     assert_eq!((m, n), (m1, n1));
     let k = m.min(n);
     let data: Vec<Complex64> = first.into_iter().chain(second).collect();
@@ -261,4 +272,52 @@ fn an_overflowing_svd_matrix_reports_the_shape_role() {
         ws.acquired, 0,
         "the argument check runs before any workspace"
     );
+}
+
+/// A `28 x 64` matrix on which Accelerate's legacy `zgesdd` with `JOBZ = 'S'` reports `info = 1`
+/// (no convergence), while its `zgesvd`, its `zgesdd` on the adjoint and OpenBLAS's `zgesdd`
+/// succeed. Its largest and smallest singular values are 1.16e3 and 5.2e-10.
+#[test]
+fn svd_succeeds_where_accelerate_zgesdd_does_not_converge() {
+    let Some((m, n, data)) = read_fixture("zgesdd_noconvergence_28x64.bin") else {
+        return;
+    };
+    let k = m.min(n);
+    let dims = [m, n];
+    let strides = [1, m as isize];
+    let a = RawStridedRef::new(&data, &dims, &strides, 0).unwrap();
+    let (mut s, mut u, mut vt) = (Vec::new(), Vec::new(), Vec::new());
+    let mut ws = TestWorkspace::default();
+    svd(
+        Op::Svd,
+        SvdMode::Thin,
+        a,
+        SvdOutputs {
+            s: &mut s,
+            u: &mut u,
+            vt: &mut vt,
+        },
+        &mut ws,
+    )
+    .unwrap();
+
+    assert!(
+        s.windows(2).all(|pair| pair[0] >= pair[1]) && s[k - 1] >= 0.0,
+        "singular values not sorted and non-negative: {s:?}"
+    );
+    let mut us = vec![Complex64::new(0.0, 0.0); m * k];
+    for col in 0..k {
+        for row in 0..m {
+            us[row + col * m] = u[row + col * m] * s[col];
+        }
+    }
+    let usvt = matmul(&us, &vt, m, k, n);
+    let error: f64 = usvt
+        .iter()
+        .zip(&data)
+        .map(|(x, y)| (x - y).norm_sqr())
+        .sum();
+    let norm: f64 = data.iter().map(|x| x.norm_sqr()).sum();
+    let relative = (error / norm).sqrt();
+    assert!(relative <= 1e-12, "|A - U S Vᴴ| / |A| = {relative:e}");
 }
